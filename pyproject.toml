@@ -1,0 +1,11 @@
+[project]
+name = "package-audit"
+version = "0.2.0"
+description = "BuildingLink package audit desktop app"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyside6",
+    "pymupdf",
+    "pandas",
+]
