@@ -1,497 +1,199 @@
-# BuildingLink Package Audit Tool
+# BuildingLink Package Audit
 
-A desktop application built to streamline package audits for residential concierge and property management operations.
+A desktop application that turns BuildingLink Event Log PDF exports into a fast,
+structured package‑auditing workflow for residential concierge and property
+management teams.
 
-The application parses BuildingLink Event Log PDF exports and transforms them into an interactive auditing workflow. Instead of manually marking printed audit sheets and writing audit summaries by hand, auditors can verify packages, record exceptions, and generate standardized audit reports automatically.
-
----
-
-## Problem
-
-Package audits were previously performed using printed BuildingLink reports.
-
-A typical workflow involved:
-
-* Printing BuildingLink package reports
-* Manually marking verified packages
-* Writing package discrepancies by hand
-* Tracking double logged packages separately
-* Creating audit summaries manually
-
-This process was repetitive, time consuming, and prone to transcription errors.
+Instead of marking up printed audit sheets and writing summaries by hand,
+auditors open an export, verify packages with a single click, record exceptions
+in spreadsheet‑style tables, and generate a standardized audit report
+automatically.
 
 ---
 
-## Solution
+## Why
 
-This application automates the audit workflow by:
+Package audits were traditionally done on paper:
 
-1. Parsing BuildingLink Event Log PDF exports
-2. Creating an interactive audit interface
-3. Tracking package verification status
-4. Recording package discrepancies
-5. Recording double logged packages
-6. Automatically generating audit reports
+- Print the BuildingLink package report
+- Mark verified packages by hand
+- Write discrepancies and double‑logged packages on the side
+- Re‑type everything into a summary
 
-The result is a significantly faster and more standardized auditing process.
-
----
-
-## Technologies
-
-* Python
-* PySide6
-* SQLite
-* PyMuPDF
-* Pandas
+That process is slow, repetitive, and easy to get wrong. This tool removes the
+transcription work by capturing audit observations directly as structured data.
 
 ---
 
-## Setup
+## Features
 
-Create the environment using uv:
+**PDF processing**
+- Parse BuildingLink Event Log PDFs
+- Extract unit, resident, package, tower, timestamp, and tracking last‑four
 
-```bash
-uv init .
-uv venv
-uv add pyside6 pymupdf pandas
+**Audit workflow**
+- One‑click verification with row highlighting
+- Live search across unit, resident, package, tracking, and tower
+- "Unchecked only" filter
+- Bulk *Mark All Visible* / *Unmark All Visible* (respect the active search/filter)
+- Progress is saved automatically and resumes when the same PDF is reopened
+
+**Manual report sections**
+- *Package Errors* — `Unit | Location | Carrier | Last 4 | Note`
+- *Double Logged Packages* — `Unit | Location | Carrier | Last 4`
+- Spreadsheet‑style editing with dropdowns, tab navigation, auto blank rows, and
+  bulk paste import
+
+**Exports**
+- Audit report (`.txt`)
+- Raw data (`.csv`)
+- Highlighted copy of the source PDF
+
+---
+
+## Tech stack
+
+- **Python** 3.10+
+- **PySide6** — desktop UI
+- **PyMuPDF** — PDF parsing and highlighting
+- **SQLite** — local audit‑state persistence (standard library)
+
+---
+
+## Project structure
+
+```
+package-audit/
+├── main.py                 # Entry point
+├── pyproject.toml          # Metadata, dependencies, tooling config
+├── app/
+│   ├── constants.py        # Locations, carriers, paths, defaults
+│   ├── models.py           # Dataclasses + value normalization
+│   ├── parser.py           # BuildingLink PDF parsing
+│   ├── database.py         # SQLite persistence layer
+│   ├── audit_report.py     # Plain-text report generation
+│   ├── export_pdf.py       # Highlighted PDF export
+│   ├── delegates.py        # Table cell editors (dropdowns)
+│   ├── theme.py            # Qt stylesheet
+│   └── main_window.py      # Main window and application wiring
+├── tests/                  # Pytest suite (models, reporting, database)
+├── data/                   # Put source PDFs here (local)
+└── exports/                # Generated reports (local)
 ```
 
-Run the application:
+---
+
+## Getting started
+
+This project uses [uv](https://docs.astral.sh/uv/).
 
 ```bash
+# Install dependencies into a virtual environment
+uv sync
+
+# Launch the application
 uv run python main.py
 ```
 
----
+### Development
 
-## Current Features
-
-### PDF Processing
-
-* Open BuildingLink Event Log PDFs
-* Automatically parse package entries
-* Extract unit information
-* Extract resident information
-* Extract package information
-* Extract tracking numbers
-* Automatically determine tracking last four digits
-
-### Audit Workflow
-
-* One click package verification
-* Search packages
-* Filter unchecked packages
-* Save audit state automatically
-* Persistent audit progress
-* Highlight verified packages
-
-### Bulk Actions
-
-* Mark All Visible
-* Unmark All Visible
-
-These actions respect:
-
-* Search filters
-* Unchecked Only filters
-
-Keyboard shortcuts:
-
-```text
-Ctrl+A          Mark All Visible
-Ctrl+Shift+A    Unmark All Visible
-```
-
-### Package Error Tracking
-
-Supports spreadsheet style entry and bulk paste import.
-
-Fields:
-
-```text
-Unit
-Location
-Carrier
-Last 4
-Error Note
-```
-
-### Double Logged Package Tracking
-
-Supports spreadsheet style entry and bulk paste import.
-
-Fields:
-
-```text
-Unit
-Location
-Carrier
-Last 4
-```
-
-### Spreadsheet Style Entry
-
-Supports:
-
-* Tab navigation
-* Direct cell editing
-* Automatic blank row creation
-* Dropdown selections
-
-Locations:
-
-```text
-SHELF
-BIN
-BB
-CG
-UG
-ALPHA
-FCR
-```
-
-Carriers:
-
-```text
-USPS
-UPS
-FEDEX
-AMZ
-ONTRAC
-DHL
-PKG
-KEY
-FOOD
-PHARMACY
-```
-
-### Export Options
-
-* Audit TXT Report
-* CSV Export
-* Highlighted PDF Export
-
----
-
-## Audit Report Format
-
-### Section 1: Picked Up But Not Closed Out
-
-Automatically generated from packages that remain unchecked during the audit.
-
-Example:
-
-```text
-1708S | 7463
-2205S | NaN
+```bash
+uv run pytest        # run the test suite
+uv run ruff check .  # lint
 ```
 
 ---
 
-### Section 2: Package Errors
+## Workflow
 
-Manually entered package discrepancies.
-
-Example:
-
-```text
-1708S | BIN | USPS | 8572 | Logged for wrong unit
-1803S | BB | AMZ | 1968 | Package found but not logged
+```mermaid
+flowchart LR
+    A[Open BuildingLink PDF] --> B[Parse packages]
+    B --> C[Verify packages<br/>search · filter · bulk mark]
+    C --> D[Record errors &<br/>double-logged packages]
+    D --> E[Export report<br/>TXT · CSV · highlighted PDF]
+    C -. auto-saved .-> F[(SQLite audit state)]
+    F -. resume .-> C
 ```
 
+1. **Open** a BuildingLink Event Log PDF.
+2. **Verify** packages by clicking a row. Use search and *Unchecked only* to
+   focus, and the bulk actions to clear large groups quickly.
+3. **Record** any package errors and double‑logged packages in their tabs.
+4. **Export** the audit report, CSV, or a highlighted PDF.
+
+### Keyboard shortcuts
+
+When the audit table is focused:
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+A` | Mark all visible |
+| `Ctrl+Shift+A` | Unmark all visible |
+
+Standard text selection (`Ctrl+A`) still works in the search box and entry tables.
+
+### Reference values
+
+| Locations | Carriers |
+| --- | --- |
+| SHELF, BIN, BB, CG, UG, ALPHA, FCR | USPS, UPS, FEDEX, AMZ, ONTRAC, DHL, PKG, KEY, FOOD, PHARMACY |
+
 ---
 
-### Section 3: Double Logged Packages
+## Report format
 
-Manually entered duplicate package records.
-
-Example:
+The exported `.txt` report has three sections:
 
 ```text
-0205S | BIN | FEDEX | 9669
-3207S | CG | UPS | 1821
+PACKAGE AUDIT REPORT
+06/15/2026 08:07 PM
+Source: Event log _ BuildingLink.pdf
+
+==================================================
+1. PICKED UP BUT NOT CLOSED OUT
+==================================================
+
+0207S | 5193
+3804S | 9823
+
+==================================================
+2. PACKAGE ERRORS
+==================================================
+
+1701S | BIN | ONTRAC | 6651 | wrong unit
+
+==================================================
+3. DOUBLE LOGGED PACKAGES
+==================================================
+
+0201S | BIN | AMZ | 5561
 ```
 
----
-
-## Audit State Management
-
-The application stores audit progress using a PDF hash.
-
-This allows audits to be paused and resumed without losing progress.
-
-### Clear Current Audit
-
-Removes:
-
-```text
-Checked package status
-Package errors
-Double logged packages
-```
-
-for the currently loaded PDF.
-
-### Clear Manual Sections
-
-Removes:
-
-```text
-Package Errors
-Double Logged Packages
-```
-
-while preserving package verification status.
+- **Section 1** is generated from packages left unchecked during the audit.
+- **Sections 2 and 3** come from the manual entry tables.
 
 ---
 
-## Version History
+## Audit state management
 
-### Version 0.1
+Audit progress is stored in a local SQLite database keyed by a hash of the PDF
+contents (`~/.package_audit/audit_state.sqlite3`). Reopening the same export
+restores checked rows and manual entries automatically.
 
-Initial proof of concept.
-
-Features:
-
-* PDF parsing
-* Package extraction
-* Click to verify packages
-
-### Version 0.2
-
-Refactored into modular architecture.
-
-Added:
-
-* models.py
-* parser.py
-* database.py
-* audit_report.py
-* gui.py
-
-### Version 0.3
-
-Added audit reporting features.
-
-Added:
-
-* Package Errors
-* Double Logged Packages
-* TXT report generation
-* CSV export
-* Highlighted PDF export
-
-### Version 0.4
-
-Added workflow improvements.
-
-Added:
-
-* Mark All Visible
-* Unmark All Visible
-* Keyboard shortcuts
-* Spreadsheet style data entry
-* Auto generated blank rows
-* Dropdown selections
-* Bulk paste support
-* Audit reset functionality
+- **Clear Current Audit** — removes checked rows, package errors, and
+  double‑logged rows for the loaded PDF.
+- **Clear Manual Sections** — removes only the package errors and double‑logged
+  rows, keeping package verification intact.
 
 ---
 
-## Impact
-
-This tool was developed to reduce the amount of manual documentation required during package audits.
-
-By converting audit observations directly into structured data, the application eliminates:
-
-* Handwritten audit sheets
-* Manual report writing
-* Manual sorting of audit findings
-* Repetitive transcription tasks
-
----
-
-## Future Development Ideas
-
-Potential future enhancements include:
-
-### Audit Intelligence
-
-* Automatic duplicate tracking number detection
-* Automatic double log detection
-* Suspicious package identification
-* Missing package pattern detection
-
-### Analytics
-
-* Historical audit database
-* Audit frequency reporting
-* Package volume trends
-* Carrier statistics
-* Building level package metrics
-
-### Workflow Improvements
-
-* Keyboard driven audit mode
-* Batch package actions
-* Resident search enhancements
-* Custom audit categories
-
-### Deployment
-
-* Standalone executable builds
-* Multi user desktop deployment
-* Local network web application
-* Mobile friendly web interface
-
-### Integrations
-
-* BuildingLink API integration (if available)
-* CSV import/export improvements
-* Excel export support
-* Email report generation
-
-# Roadmap
-
-This project began as a tool to automate BuildingLink package audits and reduce the manual work required to identify package discrepancies and generate audit reports.
-
-Current development focuses on stability, usability, and real world testing.
-
----
-
-## Version 0.4 (Current)
-
-Current feature set includes:
-
-* BuildingLink PDF parsing
-* Package audit tracking
-* Search and filtering
-* Bulk audit actions
-* Package error tracking
-* Double logged package tracking
-* Audit report generation
-* CSV export
-* Highlighted PDF export
-* Audit persistence and recovery
-
-This version is intended for active testing and workflow refinement.
-
----
-
-## Version 1.0 (Planned)
-
-The first stable production release.
-
-Goals:
-
-* Validate functionality through real audit usage
-* Eliminate workflow issues discovered during testing
-* Improve UI polish and reliability
-* Improve parser accuracy and error handling
-* Finalize audit report generation format
-* Package application for non technical users
-
-Version 1.0 represents the completion of the manual audit workflow.
-
-No camera, OCR, machine learning, or BuildingLink integration is planned for the initial production release.
-
----
-
-## Version 1.5 (Planned)
-
-Quality of life improvements.
-
-Potential additions:
-
-* Improved report templates
-* Audit history viewer
-* Additional export formats
-* Configurable report settings
-* Improved search and filtering
-* Enhanced package error management
-
----
-
-## Version 2.0 (Planned)
-
-Mobile assisted auditing.
-
-Goals:
-
-* Phone based barcode scanning
-* Automatic package matching using tracking numbers
-* Real time package verification
-* Automatic package audit completion
-
-Example workflow:
-
-1. Open audit on desktop
-2. Scan package barcode using phone
-3. Matching package is identified
-4. Package is automatically marked as audited
-
-This version aims to significantly reduce audit completion time.
-
----
-
-## Version 3.0 (Concept)
-
-Shared web application.
-
-Potential features:
-
-* Centralized audit database
-* Multi user support
-* Tablet friendly interface
-* Shared audit history
-* Cloud deployment
-* Management reporting
-
-This version would allow multiple concierge staff members to use the system from a shared platform.
-
----
-
-## Version 4.0 (Concept)
-
-Intelligent package intake system.
-
-Potential features:
-
-* Barcode scanning
-* OCR based label reading
-* Automatic carrier detection
-* Automatic tracking extraction
-* Resident and unit matching
-* Human in the Loop (HITL) confirmation workflow
-
-Example workflow:
-
-1. Scan package label
-2. System extracts package information
-3. User confirms results
-4. Package is automatically logged
-
-The objective is to reduce data entry while maintaining human verification.
-
----
-
-## Version 5.0 (Long Term Vision)
-
-BuildingLink integration and intelligent package processing.
-
-Potential features:
-
-* BuildingLink API integration
-* Automatic package logging
-* Resident lookup and validation
-* Duplicate package detection
-* Error prevention before package entry
-* Continuous learning from user corrections and audit findings
-
-Long term goal:
-
-Transform package management from a manual data entry process into a scan first workflow where staff primarily verify information rather than enter it manually.
-
-This project began as a personal productivity tool and may continue to evolve based on operational needs, user feedback, and real world usage.
-
+## Roadmap
+
+**v0.4 (current)** — complete manual audit workflow: parsing, verification,
+search/filter, bulk actions, manual report sections, persistence, and exports.
+This release is intended for active testing and workflow refinement.
+
+**v1.0 (planned)** — production hardening: real‑world audit validation, parser
+and UI polish, and packaging for non‑technical users. No camera, OCR, machine
+learning, or BuildingLink integration is planned for the first stable release.

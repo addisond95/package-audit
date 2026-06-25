@@ -1,11 +1,28 @@
 [project]
 name = "package-audit"
-version = "0.2.0"
-description = "BuildingLink package audit desktop app"
+version = "0.4.0"
+description = "BuildingLink package audit desktop application"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["buildinglink", "package", "audit", "concierge", "property-management"]
 dependencies = [
-    "pyside6",
-    "pymupdf",
-    "pandas",
+    "pyside6>=6.7",
+    "pymupdf>=1.24",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
