@@ -20,7 +20,7 @@ DB_FILENAME = "audit_state.sqlite3"
 LOCATIONS = ["SHELF", "BIN", "BB", "CG", "UG", "ALPHA", "FCR"]
 
 #: Canonical carrier codes used in the manual report tables.
-CARRIERS = ["USPS", "UPS", "FEDEX", "AMZ", "ONTRAC", "DHL", "PKG", "KEY", "FOOD", "PHARMACY"]
+CARRIERS = ["USPS", "UPS", "FEDEX", "AMZ", "ONTRAC", "DHL", "PKG", "KEY", "FOOD", "RX"]
 
 #: Dropdown option lists include a leading blank for "no selection".
 LOCATION_OPTIONS = ["", *LOCATIONS]
@@ -33,8 +33,9 @@ CARRIER_ALIASES = {
     "FEDX": "FEDEX",
     "FDX": "FEDEX",
     "AMAZON": "AMZ",
-    "PHARM": "PHARMACY",
-    "RX": "PHARMACY",
+    "PHARM": "RX",
+    "PHARMACY": "RX",
+    "RX": "RX",
 }
 
 #: Placeholder used when a tracking value cannot be determined.

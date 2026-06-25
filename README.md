@@ -137,7 +137,7 @@ Standard text selection (`Ctrl+A`) still works in the search box and entry table
 
 | Locations | Carriers |
 | --- | --- |
-| SHELF, BIN, BB, CG, UG, ALPHA, FCR | USPS, UPS, FEDEX, AMZ, ONTRAC, DHL, PKG, KEY, FOOD, PHARMACY |
+| SHELF, BIN, BB, CG, UG, ALPHA, FCR | USPS, UPS, FEDEX, AMZ, ONTRAC, DHL, PKG, KEY, FOOD, RX |
 
 ---
 

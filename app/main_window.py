@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -244,21 +243,13 @@ class PackageAuditApp(QMainWindow):
         layout.setSpacing(10)
 
         help_label = QLabel(
-            "Type directly into the table using Tab between cells, or paste multiple package "
-            "errors below. Format: Unit | Location | Carrier | Last4 | Note"
+            "Tab between cells to move across columns. A new blank row is added automatically "
+            "as you type. Fields: Unit · Location · Carrier · Last 4 · Note"
         )
         help_label.setWordWrap(True)
 
-        self.error_paste = QTextEdit()
-        self.error_paste.setPlaceholderText(
-            "1708S | BIN | USPS | 8572 | Logged for wrong unit\n"
-            "1803S | BB | AMZ | 1968 | Package found but not logged"
-        )
-        self.error_paste.setFixedHeight(96)
-
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
-        self._add_button(buttons, "Add Pasted Errors", self.add_pasted_errors, "primary")
         self._add_button(buttons, "Add Blank Row", self.add_blank_error_row)
         self._add_button(buttons, "Delete Selected Rows", self.delete_selected_errors, "danger")
         self._add_button(buttons, "Save Rows", self.save_error_rows)
@@ -267,8 +258,8 @@ class PackageAuditApp(QMainWindow):
         self.errors_table = QTableWidget(0, ERROR_COLUMNS)
         self.errors_table.setHorizontalHeaderLabels(ERROR_HEADERS)
         self.errors_table.setAlternatingRowColors(True)
-        self.errors_table.verticalHeader().setDefaultSectionSize(30)
-        for col, width in enumerate((90, 100, 110, 90, 700)):
+        self.errors_table.verticalHeader().setDefaultSectionSize(44)
+        for col, width in enumerate((90, 115, 125, 90, 700)):
             self.errors_table.setColumnWidth(col, width)
         self.errors_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.errors_table.setItemDelegateForColumn(1, ComboBoxDelegate(LOCATION_OPTIONS, self.errors_table))
@@ -276,7 +267,6 @@ class PackageAuditApp(QMainWindow):
         self.errors_table.itemChanged.connect(self.on_errors_table_changed)
 
         layout.addWidget(help_label)
-        layout.addWidget(self.error_paste)
         layout.addLayout(buttons)
         layout.addWidget(self.errors_table)
         return tab
@@ -288,18 +278,13 @@ class PackageAuditApp(QMainWindow):
         layout.setSpacing(10)
 
         help_label = QLabel(
-            "Type directly into the table using Tab between cells, or paste multiple double "
-            "logged packages below. Format: Unit | Location | Carrier | Last4"
+            "Tab between cells to move across columns. A new blank row is added automatically "
+            "as you type. Fields: Unit · Location · Carrier · Last 4"
         )
         help_label.setWordWrap(True)
 
-        self.double_paste = QTextEdit()
-        self.double_paste.setPlaceholderText("0205S | BIN | FEDEX | 9669\n3207S | CG | UPS | 1821")
-        self.double_paste.setFixedHeight(96)
-
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
-        self._add_button(buttons, "Add Pasted Double Logs", self.add_pasted_double_logged, "primary")
         self._add_button(buttons, "Add Blank Row", self.add_blank_double_row)
         self._add_button(buttons, "Delete Selected Rows", self.delete_selected_double_logged, "danger")
         self._add_button(buttons, "Save Rows", self.save_double_rows)
@@ -308,8 +293,8 @@ class PackageAuditApp(QMainWindow):
         self.double_table = QTableWidget(0, DOUBLE_COLUMNS)
         self.double_table.setHorizontalHeaderLabels(DOUBLE_HEADERS)
         self.double_table.setAlternatingRowColors(True)
-        self.double_table.verticalHeader().setDefaultSectionSize(30)
-        for col, width in enumerate((90, 100, 110, 90)):
+        self.double_table.verticalHeader().setDefaultSectionSize(44)
+        for col, width in enumerate((90, 115, 125, 90)):
             self.double_table.setColumnWidth(col, width)
         self.double_table.horizontalHeader().setStretchLastSection(True)
         self.double_table.setItemDelegateForColumn(1, ComboBoxDelegate(LOCATION_OPTIONS, self.double_table))
@@ -317,7 +302,6 @@ class PackageAuditApp(QMainWindow):
         self.double_table.itemChanged.connect(self.on_double_table_changed)
 
         layout.addWidget(help_label)
-        layout.addWidget(self.double_paste)
         layout.addLayout(buttons)
         layout.addWidget(self.double_table)
         return tab
@@ -506,71 +490,6 @@ class PackageAuditApp(QMainWindow):
             self._refresh_table()
 
     # --------------------------------------------------------- manual tables
-    def parse_pipe_lines(self, text: str, expected_min_fields: int) -> list[list[str]]:
-        """Split pasted text into field lists, accepting ``|`` or ``,`` separators."""
-        rows: list[list[str]] = []
-        for line_number, raw_line in enumerate(text.splitlines(), start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            separator = "|" if "|" in line else ","
-            parts = [part.strip() for part in line.split(separator)]
-            if len(parts) < expected_min_fields:
-                QMessageBox.warning(
-                    self,
-                    "Bad pasted row",
-                    f"Line {line_number} has too few fields:\n{raw_line}",
-                )
-                continue
-            rows.append(parts)
-        return rows
-
-    def add_pasted_errors(self) -> None:
-        rows = self.parse_pipe_lines(self.error_paste.toPlainText(), ERROR_COLUMNS)
-
-        def populate() -> None:
-            self._remove_trailing_blank_rows(self.errors_table, ERROR_COLUMNS)
-            for parts in rows:
-                unit, location, carrier, last4 = parts[:4]
-                note = " | ".join(parts[4:]).strip()
-                self._add_table_row(
-                    self.errors_table,
-                    [
-                        normalize_unit(unit),
-                        normalize_location(location),
-                        normalize_carrier(carrier),
-                        normalize_last4(last4),
-                        note,
-                    ],
-                )
-            self._ensure_blank_last_row(self.errors_table, ERROR_COLUMNS)
-
-        self._with_table_loading(populate)
-        self.error_paste.clear()
-        self.save_error_rows()
-
-    def add_pasted_double_logged(self) -> None:
-        rows = self.parse_pipe_lines(self.double_paste.toPlainText(), DOUBLE_COLUMNS)
-
-        def populate() -> None:
-            self._remove_trailing_blank_rows(self.double_table, DOUBLE_COLUMNS)
-            for parts in rows:
-                unit, location, carrier, last4 = parts[:4]
-                self._add_table_row(
-                    self.double_table,
-                    [
-                        normalize_unit(unit),
-                        normalize_location(location),
-                        normalize_carrier(carrier),
-                        normalize_last4(last4),
-                    ],
-                )
-            self._ensure_blank_last_row(self.double_table, DOUBLE_COLUMNS)
-
-        self._with_table_loading(populate)
-        self.double_paste.clear()
-        self.save_double_rows()
-
     def _add_table_row(self, table: QTableWidget, values: list[str]) -> None:
         row = table.rowCount()
         table.insertRow(row)

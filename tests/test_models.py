@@ -22,7 +22,7 @@ def test_normalize_carrier_resolves_aliases():
     assert normalize_carrier("fedx") == "FEDEX"
     assert normalize_carrier("fdx") == "FEDEX"
     assert normalize_carrier("amazon") == "AMZ"
-    assert normalize_carrier("rx") == "PHARMACY"
+    assert normalize_carrier("rx") == "RX"
     assert normalize_carrier("ups") == "UPS"
 
 
