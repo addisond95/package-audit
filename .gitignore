@@ -12,5 +12,10 @@ wheels/
 # macOS
 .DS_Store
 
+# PyInstaller artefacts
+build/
+dist/
+*.spec.bak
+
 # Source exports may contain resident data — keep them local
 data/*.pdf

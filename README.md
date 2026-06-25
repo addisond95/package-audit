@@ -102,6 +102,13 @@ uv run pytest        # run the test suite
 uv run ruff check .  # lint
 ```
 
+### Build a standalone macOS app
+
+```bash
+uv run pyinstaller package-audit.spec --clean -y
+# Output: dist/Package Audit.app  (~146 MB, double-clickable, no Python required)
+```
+
 ---
 
 ## Workflow
