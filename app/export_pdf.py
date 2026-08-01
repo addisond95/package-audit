@@ -92,14 +92,10 @@ def write_highlighted_pdf(
     output_pdf_path: Path,
     entries: list[AuditEntry],
     highlight_color: QColor,
+    entry_colors: dict[str, QColor] | None = None,
 ) -> None:
     """Write a copy of the source PDF with audited rows highlighted."""
-    rgb = (
-        highlight_color.red() / 255,
-        highlight_color.green() / 255,
-        highlight_color.blue() / 255,
-    )
-    opacity = max(0.15, min(0.65, highlight_color.alpha() / 255))
+    entry_colors = entry_colors or {}
 
     entries_by_page: dict[int, list[AuditEntry]] = {}
     for entry in entries:
@@ -115,8 +111,14 @@ def write_highlighted_pdf(
             row_tops = sorted({match.y0 for _, match in resolved_entries})
 
             for entry, match in resolved_entries:
-                if not entry.audited:
+                color = entry_colors.get(entry.item_id)
+                if color is None and entry.audited:
+                    color = highlight_color
+                if color is None:
                     continue
+
+                rgb = (color.red() / 255, color.green() / 255, color.blue() / 255)
+                opacity = max(0.15, min(0.65, color.alpha() / 255))
 
                 next_row_top = next((top for top in row_tops if top > match.y0 + 1), None)
                 y0 = max(0, match.y0 - 3)

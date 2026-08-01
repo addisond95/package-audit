@@ -21,6 +21,7 @@ a = Analysis(
         "PySide6.QtGui",
         "PySide6.QtWidgets",
         "PySide6.QtPrintSupport",
+        "zxingcpp",
     ],
     hookspath=[],
     hooksconfig={},

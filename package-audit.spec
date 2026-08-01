@@ -25,6 +25,7 @@ a = Analysis(
         "PySide6.QtGui",
         "PySide6.QtWidgets",
         "PySide6.QtPrintSupport",
+        "zxingcpp",
     ],
     hookspath=[],
     hooksconfig={},
@@ -81,8 +82,8 @@ app = BUNDLE(  # noqa: F821
     bundle_identifier="com.packageaudit.app",
     info_plist={
         "CFBundleDisplayName": "Package Audit",
-        "CFBundleShortVersionString": "0.4.0",
-        "CFBundleVersion": "0.4.0",
+        "CFBundleShortVersionString": "0.5.0",
+        "CFBundleVersion": "0.5.0",
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,
     },

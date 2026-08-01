@@ -16,6 +16,7 @@ from app.models import (
     normalize_carrier,
     normalize_last4,
     normalize_location,
+    normalize_tracking,
     normalize_unit,
     unit_sort_key,
 )
@@ -81,6 +82,7 @@ def make_audit_report(
                     normalize_unit(r.unit),
                     normalize_location(r.location),
                     normalize_carrier(r.carrier),
+                    normalize_tracking(r.tracking),
                     normalize_last4(r.last4),
                     r.note.strip(),
                 ]
@@ -100,6 +102,7 @@ def make_audit_report(
                     normalize_unit(r.unit),
                     normalize_location(r.location),
                     normalize_carrier(r.carrier),
+                    normalize_tracking(r.tracking),
                     normalize_last4(r.last4),
                 ]
                 for r in double_logged

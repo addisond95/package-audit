@@ -43,6 +43,12 @@ def build_stylesheet() -> str:
     /* Header ------------------------------------------------------------ */
     QLabel#appTitle {{ font-size: 20px; font-weight: 700; color: {TEXT}; }}
     QLabel#appSubtitle {{ color: {MUTED}; font-size: 12px; }}
+    QLabel#scannerTitle {{ font-size: 19px; font-weight: 700; color: {TEXT}; }}
+    QLabel#scannerStatus {{ color: {MUTED}; font-size: 12px; }}
+    QLabel#pairingCode {{
+        color: {TEXT}; background: {SURFACE_ALT}; border: 1px solid {BORDER_STRONG};
+        border-radius: 6px; padding: 10px; font-size: 28px; font-weight: 700;
+    }}
     QLabel[chip="true"] {{
         background: {SURFACE}; border: 1px solid {BORDER};
         border-radius: 13px; padding: 5px 13px;

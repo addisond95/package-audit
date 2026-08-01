@@ -61,8 +61,27 @@ def test_report_formats_manual_sections_as_delimited_rows():
     doubles = [DoubleLoggedPackage("0201S", "BIN", "AMZ", "5561")]
     report = make_audit_report([], errors, doubles)
 
-    assert "1701S | BIN | ONTRAC | 6651 | wrong unit" in report
-    assert "0201S | BIN | AMZ | 5561" in report
+    assert "1701S | BIN | ONTRAC |  | 6651 | wrong unit" in report
+    assert "0201S | BIN | AMZ |  | 5561" in report
+
+
+def test_report_includes_full_tracking_for_scanner_rows():
+    errors = [
+        PackageError(
+            "1701S",
+            "",
+            "PKG",
+            "6784",
+            "Not logged",
+            "1Z999AA10123456784",
+        )
+    ]
+    doubles = [DoubleLoggedPackage("1802S", "", "UPS", "6784", "1Z999AA10123456784")]
+
+    report = make_audit_report([], errors, doubles)
+
+    assert "1701S |  | PKG | 1Z999AA10123456784 | 6784 | Not logged" in report
+    assert "1802S |  | UPS | 1Z999AA10123456784 | 6784" in report
 
 
 def test_report_uses_ascii_section_rules():

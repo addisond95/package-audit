@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import csv
 import sys
+from collections import Counter
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,17 +47,24 @@ from app.models import (
     AuditEntry,
     DoubleLoggedPackage,
     PackageError,
+    ScannerAlert,
+    ScannerEvent,
     normalize_carrier,
     normalize_last4,
     normalize_location,
+    normalize_tracking,
     normalize_unit,
 )
 from app.parser import file_hash, parse_buildinglink_pdf
+from app.scanner_server import ScannerAction, ScannerCoordinator, ScannerServer
+from app.scanner_ui import ScannerPairingDialog
+from app.scanner_vision import scanner_capabilities
 from app.theme import build_stylesheet
 
 AUDIT_HEADERS = ["Done", "Unit", "Last 4", "Resident", "Package", "Tower", "Timestamp", "Page"]
-ERROR_HEADERS = ["Unit", "Location", "Carrier", "Last 4", "Error Note"]
-DOUBLE_HEADERS = ["Unit", "Location", "Carrier", "Last 4"]
+ERROR_HEADERS = ["Unit", "Location", "Carrier", "Tracking", "Last 4", "Error Note"]
+DOUBLE_HEADERS = ["Unit", "Location", "Carrier", "Tracking", "Last 4"]
+ALERT_HEADERS = ["Status", "Type", "Unit", "Carrier", "Tracking", "Last 4", "Message", "Time"]
 
 ERROR_COLUMNS = len(ERROR_HEADERS)
 DOUBLE_COLUMNS = len(DOUBLE_HEADERS)
@@ -64,6 +72,13 @@ DOUBLE_COLUMNS = len(DOUBLE_HEADERS)
 #: Stored on the first column of each audit row so toggling stays correct even
 #: after the user re-sorts the table by clicking a header.
 ENTRY_INDEX_ROLE = Qt.UserRole
+ALERT_KEY_ROLE = Qt.UserRole + 1
+
+ALERT_COLORS = {
+    "error": QColor(242, 95, 92, 95),
+    "warning": QColor(245, 166, 35, 95),
+    "review": QColor(242, 201, 76, 95),
+}
 
 
 class PackageAuditApp(QMainWindow):
@@ -84,11 +99,21 @@ class PackageAuditApp(QMainWindow):
         self.filtered_indices: list[int] = []
         self.highlight_color = QColor(*DEFAULT_HIGHLIGHT_RGBA)
         self.loading_manual_tables = False
+        self.scanner_coordinator = ScannerCoordinator()
+        self.scanner_server: ScannerServer | None = None
+        self.scanner_dialog: ScannerPairingDialog | None = None
+        self.scanner_undo: dict[str, dict] = {}
+        self.scanner_item_states: dict[str, str] = {}
+        self.open_alert_count = 0
 
         self._build_menu()
         self._build_ui()
         self._build_shortcuts()
         self._refresh_table()
+
+        self.scanner_timer = QTimer(self)
+        self.scanner_timer.timeout.connect(self._process_scanner_actions)
+        self.scanner_timer.start(100)
 
     # ------------------------------------------------------------------ UI
     def _build_menu(self) -> None:
@@ -128,6 +153,7 @@ class PackageAuditApp(QMainWindow):
         self.tabs.addTab(self._build_audit_tab(), "Audit")
         self.tabs.addTab(self._build_errors_tab(), "Package Errors")
         self.tabs.addTab(self._build_double_logged_tab(), "Double Logged")
+        self.tabs.addTab(self._build_alerts_tab(), "Alerts")
         layout.addWidget(self.tabs, stretch=1)
 
         self._with_table_loading(
@@ -169,6 +195,7 @@ class PackageAuditApp(QMainWindow):
         self._add_button(toolbar, "Export CSV", self.export_csv)
         self._add_button(toolbar, "Export Highlighted PDF", self.export_highlighted_pdf)
         self._add_button(toolbar, "Highlight Color", self.choose_color)
+        self.scanner_button = self._add_button(toolbar, "Start Phone Scanner", self.start_phone_scanner)
         toolbar.addWidget(self._make_vline())
         self._add_button(toolbar, "Clear Current Audit", self.clear_current_audit, "danger")
         self._add_button(toolbar, "Clear Manual Sections", self.clear_manual_sections, "danger")
@@ -180,10 +207,17 @@ class PackageAuditApp(QMainWindow):
         self.remaining_chip = self._make_chip()
         self.units_chip = self._make_chip()
         self.showing_chip = self._make_chip()
+        self.alerts_chip = self._make_chip()
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        for chip in (self.audited_chip, self.remaining_chip, self.units_chip, self.showing_chip):
+        for chip in (
+            self.audited_chip,
+            self.remaining_chip,
+            self.units_chip,
+            self.showing_chip,
+            self.alerts_chip,
+        ):
             row.addWidget(chip)
         row.addStretch(1)
 
@@ -244,7 +278,7 @@ class PackageAuditApp(QMainWindow):
 
         help_label = QLabel(
             "Tab between cells to move across columns. A new blank row is added automatically "
-            "as you type. Fields: Unit · Location · Carrier · Last 4 · Note"
+            "as you type. Fields: Unit · Location · Carrier · Tracking · Last 4 · Note"
         )
         help_label.setWordWrap(True)
 
@@ -259,9 +293,9 @@ class PackageAuditApp(QMainWindow):
         self.errors_table.setHorizontalHeaderLabels(ERROR_HEADERS)
         self.errors_table.setAlternatingRowColors(True)
         self.errors_table.verticalHeader().setDefaultSectionSize(44)
-        for col, width in enumerate((90, 115, 125, 90, 700)):
+        for col, width in enumerate((90, 105, 110, 260, 80, 500)):
             self.errors_table.setColumnWidth(col, width)
-        self.errors_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.errors_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         self.errors_table.setItemDelegateForColumn(1, ComboBoxDelegate(LOCATION_OPTIONS, self.errors_table))
         self.errors_table.setItemDelegateForColumn(2, ComboBoxDelegate(CARRIER_OPTIONS, self.errors_table))
         self.errors_table.itemChanged.connect(self.on_errors_table_changed)
@@ -279,7 +313,7 @@ class PackageAuditApp(QMainWindow):
 
         help_label = QLabel(
             "Tab between cells to move across columns. A new blank row is added automatically "
-            "as you type. Fields: Unit · Location · Carrier · Last 4"
+            "as you type. Fields: Unit · Location · Carrier · Tracking · Last 4"
         )
         help_label.setWordWrap(True)
 
@@ -294,7 +328,7 @@ class PackageAuditApp(QMainWindow):
         self.double_table.setHorizontalHeaderLabels(DOUBLE_HEADERS)
         self.double_table.setAlternatingRowColors(True)
         self.double_table.verticalHeader().setDefaultSectionSize(44)
-        for col, width in enumerate((90, 115, 125, 90)):
+        for col, width in enumerate((90, 110, 115, 300, 90)):
             self.double_table.setColumnWidth(col, width)
         self.double_table.horizontalHeader().setStretchLastSection(True)
         self.double_table.setItemDelegateForColumn(1, ComboBoxDelegate(LOCATION_OPTIONS, self.double_table))
@@ -304,6 +338,33 @@ class PackageAuditApp(QMainWindow):
         layout.addWidget(help_label)
         layout.addLayout(buttons)
         layout.addWidget(self.double_table)
+        return tab
+
+    def _build_alerts_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        buttons = QHBoxLayout()
+        self._add_button(buttons, "Resolve Selected", self.resolve_selected_alerts)
+        self._add_button(buttons, "Reopen Selected", self.reopen_selected_alerts)
+        buttons.addStretch(1)
+
+        self.alerts_table = QTableWidget(0, len(ALERT_HEADERS))
+        self.alerts_table.setHorizontalHeaderLabels(ALERT_HEADERS)
+        self.alerts_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.alerts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.alerts_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.alerts_table.setAlternatingRowColors(True)
+        self.alerts_table.verticalHeader().setVisible(False)
+        self.alerts_table.verticalHeader().setDefaultSectionSize(36)
+        for column, width in enumerate((80, 110, 80, 90, 210, 75, 500, 150)):
+            self.alerts_table.setColumnWidth(column, width)
+        self.alerts_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+
+        layout.addLayout(buttons)
+        layout.addWidget(self.alerts_table)
         return tab
 
     def _build_shortcuts(self) -> None:
@@ -376,6 +437,7 @@ class PackageAuditApp(QMainWindow):
 
         self.source_label.setText(f"{path.name}  •  {len(entries)} packages")
         self._load_manual_rows()
+        self._configure_scanner_for_audit()
         self._refresh_table()
         self.statusBar().showMessage(f"Loaded {path.name}", 5000)
 
@@ -418,7 +480,10 @@ class PackageAuditApp(QMainWindow):
                 if col == 0:
                     item.setTextAlignment(Qt.AlignCenter)
                     item.setData(ENTRY_INDEX_ROLE, entry_index)
-                if entry.audited:
+                scanner_state = self.scanner_item_states.get(entry.item_id)
+                if scanner_state in ALERT_COLORS:
+                    item.setBackground(ALERT_COLORS[scanner_state])
+                elif entry.audited:
                     item.setBackground(self.highlight_color)
                 self.table.setItem(row, col, item)
 
@@ -436,6 +501,7 @@ class PackageAuditApp(QMainWindow):
         self.remaining_chip.setText(self._chip_text(remaining, "not closed out"))
         self.units_chip.setText(self._chip_text(unique_units, "unique units"))
         self.showing_chip.setText(self._chip_text(showing, "rows shown"))
+        self.alerts_chip.setText(self._chip_text(self.open_alert_count, "open alerts"))
         self.progress.setValue(int(done / total * 100) if total else 0)
 
     @staticmethod
@@ -459,6 +525,7 @@ class PackageAuditApp(QMainWindow):
         entry.audited = not entry.audited
         if self.pdf_hash:
             self.db.set_state(self.pdf_hash, entry.item_id, entry.audited)
+            self.scanner_coordinator.configure(self.pdf_hash, self.entries)
         self._refresh_table()
 
     def mark_all_visible(self) -> None:
@@ -480,6 +547,7 @@ class PackageAuditApp(QMainWindow):
                 self.db.set_state(self.pdf_hash, entry.item_id, audited)
                 changed = True
         if changed:
+            self.scanner_coordinator.configure(self.pdf_hash, self.entries)
             self._refresh_table()
 
     def choose_color(self) -> None:
@@ -537,7 +605,8 @@ class PackageAuditApp(QMainWindow):
             0: normalize_unit,
             1: normalize_location,
             2: normalize_carrier,
-            3: lambda v: normalize_last4(v) if v else "",
+            3: normalize_tracking,
+            4: lambda v: normalize_last4(v) if v else "",
         }
         normalizer = normalizers.get(item.column())
         new_value = normalizer(value) if normalizer else value
@@ -580,10 +649,13 @@ class PackageAuditApp(QMainWindow):
                 unit=normalize_unit(unit),
                 location=normalize_location(location),
                 carrier=normalize_carrier(carrier),
+                tracking=normalize_tracking(tracking),
                 last4=normalize_last4(last4),
                 note=note.strip(),
             )
-            for unit, location, carrier, last4, note in self._collect_rows(self.errors_table, ERROR_COLUMNS)
+            for unit, location, carrier, tracking, last4, note in self._collect_rows(
+                self.errors_table, ERROR_COLUMNS
+            )
         ]
 
     def collect_double_rows(self) -> list[DoubleLoggedPackage]:
@@ -592,9 +664,12 @@ class PackageAuditApp(QMainWindow):
                 unit=normalize_unit(unit),
                 location=normalize_location(location),
                 carrier=normalize_carrier(carrier),
+                tracking=normalize_tracking(tracking),
                 last4=normalize_last4(last4),
             )
-            for unit, location, carrier, last4 in self._collect_rows(self.double_table, DOUBLE_COLUMNS)
+            for unit, location, carrier, tracking, last4 in self._collect_rows(
+                self.double_table, DOUBLE_COLUMNS
+            )
         ]
 
     def save_error_rows(self) -> None:
@@ -611,8 +686,13 @@ class PackageAuditApp(QMainWindow):
             for row in rows:
                 self._add_table_row(
                     self.errors_table,
-                    [row.unit, row.location, row.carrier, row.last4, row.note],
+                    [row.unit, row.location, row.carrier, row.tracking, row.last4, row.note],
                 )
+                if row.note.casefold() == "not logged":
+                    for column in range(ERROR_COLUMNS):
+                        item = self.errors_table.item(self.errors_table.rowCount() - 1, column)
+                        if item:
+                            item.setBackground(ALERT_COLORS["error"])
             self._ensure_blank_last_row(self.errors_table, ERROR_COLUMNS)
 
         self._with_table_loading(populate)
@@ -621,7 +701,14 @@ class PackageAuditApp(QMainWindow):
         def populate() -> None:
             self.double_table.setRowCount(0)
             for row in rows:
-                self._add_table_row(self.double_table, [row.unit, row.location, row.carrier, row.last4])
+                self._add_table_row(
+                    self.double_table,
+                    [row.unit, row.location, row.carrier, row.tracking, row.last4],
+                )
+                for column in range(DOUBLE_COLUMNS):
+                    item = self.double_table.item(self.double_table.rowCount() - 1, column)
+                    if item:
+                        item.setBackground(ALERT_COLORS["warning"])
             self._ensure_blank_last_row(self.double_table, DOUBLE_COLUMNS)
 
         self._with_table_loading(populate)
@@ -634,6 +721,431 @@ class PackageAuditApp(QMainWindow):
             action()
         finally:
             self.loading_manual_tables = previous
+
+    # ---------------------------------------------------------- phone scanner
+    def start_phone_scanner(self) -> None:
+        if not self._require_entries() or not self.pdf_hash:
+            return
+        self.scanner_coordinator.configure(
+            self.pdf_hash,
+            self.entries,
+            self.db.load_scanner_model(),
+        )
+        if self.scanner_server is None:
+            self.scanner_server = ScannerServer(self.scanner_coordinator)
+        try:
+            self.scanner_server.start()
+        except OSError as exc:
+            QMessageBox.critical(self, "Scanner failed", f"Could not start the local scanner:\n{exc}")
+            return
+
+        if self.scanner_dialog is None:
+            self.scanner_dialog = ScannerPairingDialog(
+                self.scanner_server,
+                scanner_capabilities(),
+                self.stop_phone_scanner,
+                self,
+            )
+        self.scanner_dialog.show()
+        self.scanner_dialog.raise_()
+        self.scanner_dialog.activateWindow()
+        self.scanner_button.setText("Scanner Info")
+        self.statusBar().showMessage(f"Phone scanner running at {self.scanner_server.url}")
+
+    def stop_phone_scanner(self) -> None:
+        dialog = self.scanner_dialog
+        self.scanner_dialog = None
+        if dialog:
+            dialog.hide()
+            dialog.stop_callback = lambda: None
+            dialog.deleteLater()
+        if self.scanner_server:
+            self.scanner_server.stop()
+        self.scanner_server = None
+        if hasattr(self, "scanner_button"):
+            self.scanner_button.setText("Start Phone Scanner")
+        self.statusBar().showMessage("Phone scanner stopped.", 5000)
+
+    @staticmethod
+    def _entry_carrier(entry: AuditEntry) -> str:
+        return normalize_carrier(entry.package.split(" - ", 1)[0]) or "PKG"
+
+    def _configure_scanner_for_audit(self) -> None:
+        if not self.pdf_hash:
+            return
+        self.scanner_undo.clear()
+        self.scanner_coordinator.configure(
+            self.pdf_hash,
+            self.entries,
+            self.db.load_scanner_model(),
+        )
+        entries_by_id = {entry.item_id: entry for entry in self.entries}
+        for tracking, records in self.scanner_coordinator.duplicate_groups():
+            item_ids = tuple(record.item_id for record in records)
+            units = sorted({record.unit for record in records})
+            for record in records:
+                entry = entries_by_id[record.item_id]
+                self.db.add_double_logged_if_missing(
+                    self.pdf_hash,
+                    DoubleLoggedPackage(
+                        unit=entry.unit,
+                        location="",
+                        carrier=self._entry_carrier(entry),
+                        last4=record.last4,
+                        tracking=tracking,
+                    ),
+                )
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=f"duplicate:{tracking}",
+                    kind="duplicate",
+                    severity="warning",
+                    unit=" / ".join(units),
+                    tracking=tracking,
+                    last4=tracking[-4:],
+                    message="The same tracking number appears multiple times in this audit.",
+                    item_ids=item_ids,
+                ),
+            )
+        self._populate_double_table(self.db.load_double_logged(self.pdf_hash))
+        self._refresh_alerts()
+
+    def _process_scanner_actions(self) -> None:
+        actions = self.scanner_coordinator.drain_actions()
+        if not actions or not self.pdf_hash:
+            return
+        for action in actions:
+            self._apply_scanner_action(action)
+        self.scanner_coordinator.configure(self.pdf_hash, self.entries)
+        self._populate_errors_table(self.db.load_package_errors(self.pdf_hash))
+        self._populate_double_table(self.db.load_double_logged(self.pdf_hash))
+        self._refresh_alerts()
+        self._refresh_table()
+
+    def _history(self, scan_id: str) -> dict:
+        return self.scanner_undo.setdefault(
+            scan_id,
+            {
+                "audited": {},
+                "alerts": [],
+                "package_tracking": "",
+                "double_rows": [],
+            },
+        )
+
+    def _apply_scanner_action(self, action: ScannerAction) -> None:
+        if not self.pdf_hash:
+            return
+        if action.kind == "undo":
+            self._undo_scanner_action(action.scan_id)
+            return
+        if action.kind == "reject":
+            self._undo_scanner_action(action.scan_id, save_event=False)
+            if action.model:
+                self.db.save_scanner_model(action.model)
+            suggested_candidate = next(
+                (
+                    candidate
+                    for candidate in action.decision.candidates
+                    if candidate.item_id == action.suggested_item_id
+                ),
+                None,
+            )
+            self.db.record_scanner_feedback(
+                self.pdf_hash,
+                action.observation.scan_key,
+                "rejected",
+                action.suggested_item_id,
+                "",
+                suggested_candidate.features if suggested_candidate else {},
+            )
+            self._save_scanner_event(action, status="rejected")
+            return
+
+        history = self._history(action.scan_id)
+        if action.kind == "match":
+            entry = next((entry for entry in self.entries if entry.item_id == action.item_id), None)
+            if entry:
+                history["audited"].setdefault(entry.item_id, entry.audited)
+                entry.audited = True
+                self.db.set_state(self.pdf_hash, entry.item_id, True)
+                review_key = f"review:{action.scan_id}"
+                self.db.resolve_scanner_alert(self.pdf_hash, review_key)
+                if action.model:
+                    self.db.save_scanner_model(action.model)
+                    selected_candidate = next(
+                        (
+                            candidate
+                            for candidate in action.decision.candidates
+                            if candidate.item_id == action.item_id
+                        ),
+                        None,
+                    )
+                    self.db.record_scanner_feedback(
+                        self.pdf_hash,
+                        action.observation.scan_key,
+                        "corrected"
+                        if action.suggested_item_id and action.suggested_item_id != action.item_id
+                        else "accepted",
+                        action.suggested_item_id,
+                        action.item_id,
+                        selected_candidate.features if selected_candidate else {},
+                    )
+            self._save_scanner_event(action)
+            return
+
+        if action.kind == "not_found":
+            tracking = normalize_tracking(action.decision.tracking)
+            alert_key = f"not_found:{tracking or action.scan_id}"
+            existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
+            inserted = self.db.add_package_error_if_missing(
+                self.pdf_hash,
+                PackageError(
+                    unit=action.decision.unit,
+                    location="",
+                    carrier=action.decision.carrier,
+                    last4=tracking[-4:] if tracking else "",
+                    note="Not logged",
+                    tracking=tracking,
+                ),
+            )
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="not_found",
+                    severity="error",
+                    unit=action.decision.unit,
+                    carrier=action.decision.carrier,
+                    tracking=tracking,
+                    last4=tracking[-4:] if tracking else "",
+                    message="Package is not present in the loaded audit. Logged as Not logged.",
+                ),
+            )
+            if inserted:
+                history["package_tracking"] = tracking
+            if alert_key not in existing_keys:
+                history["alerts"].append(alert_key)
+            previous_units = {
+                event.unit
+                for event in self.db.load_scanner_events(self.pdf_hash)
+                if event.tracking == tracking and event.unit and event.unit != action.decision.unit
+            }
+            if tracking and action.decision.unit and previous_units:
+                duplicate_key = f"duplicate_scan:{tracking}"
+                duplicate_units = previous_units | {action.decision.unit}
+                for unit in duplicate_units:
+                    inserted_double = self.db.add_double_logged_if_missing(
+                        self.pdf_hash,
+                        DoubleLoggedPackage(
+                            unit=unit,
+                            location="",
+                            carrier=action.decision.carrier,
+                            last4=tracking[-4:],
+                            tracking=tracking,
+                        ),
+                    )
+                    if inserted_double:
+                        history["double_rows"].append((unit, tracking))
+                self.db.upsert_scanner_alert(
+                    self.pdf_hash,
+                    ScannerAlert(
+                        alert_key=duplicate_key,
+                        kind="duplicate",
+                        severity="warning",
+                        unit=" / ".join(sorted(duplicate_units)),
+                        carrier=action.decision.carrier,
+                        tracking=tracking,
+                        last4=tracking[-4:],
+                        message="The same unlogged tracking was scanned for different units.",
+                    ),
+                )
+                if duplicate_key not in existing_keys:
+                    history["alerts"].append(duplicate_key)
+            self.db.resolve_scanner_alert(self.pdf_hash, f"review:{action.scan_id}")
+            self._save_scanner_event(action)
+            return
+
+        if action.kind == "duplicate":
+            tracking = normalize_tracking(action.decision.tracking)
+            alert_key = f"duplicate:{tracking or action.scan_id}"
+            existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
+            related = [entry for entry in self.entries if entry.item_id in action.decision.related_item_ids]
+            related_units = {entry.unit for entry in related}
+            for entry in related:
+                inserted = self.db.add_double_logged_if_missing(
+                    self.pdf_hash,
+                    DoubleLoggedPackage(
+                        unit=entry.unit,
+                        location="",
+                        carrier=self._entry_carrier(entry),
+                        last4=tracking[-4:] if tracking else entry.last4,
+                        tracking=tracking,
+                    ),
+                )
+                if inserted:
+                    history["double_rows"].append((entry.unit, tracking))
+            if action.decision.unit and action.decision.unit not in related_units:
+                inserted = self.db.add_double_logged_if_missing(
+                    self.pdf_hash,
+                    DoubleLoggedPackage(
+                        unit=action.decision.unit,
+                        location="",
+                        carrier=action.decision.carrier,
+                        last4=tracking[-4:] if tracking else "",
+                        tracking=tracking,
+                    ),
+                )
+                if inserted:
+                    history["double_rows"].append((action.decision.unit, tracking))
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="duplicate",
+                    severity="warning",
+                    unit=" / ".join(sorted({*related_units, action.decision.unit} - {""})),
+                    carrier=action.decision.carrier,
+                    tracking=tracking,
+                    last4=tracking[-4:] if tracking else "",
+                    message="Duplicate tracking requires investigation.",
+                    item_ids=action.decision.related_item_ids,
+                ),
+            )
+            if alert_key not in existing_keys:
+                history["alerts"].append(alert_key)
+            self._save_scanner_event(action)
+            return
+
+        if action.kind == "review":
+            alert_key = f"review:{action.scan_id}"
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="review",
+                    severity="review",
+                    unit=action.decision.unit,
+                    carrier=action.decision.carrier,
+                    tracking=action.decision.tracking,
+                    last4=action.decision.tracking[-4:] if action.decision.tracking else "",
+                    message="Phone confirmation is required.",
+                    item_ids=action.decision.related_item_ids,
+                ),
+            )
+            history["alerts"].append(alert_key)
+            self._save_scanner_event(action)
+            return
+
+        self._save_scanner_event(action)
+
+    def _save_scanner_event(self, action: ScannerAction, status: str | None = None) -> None:
+        if not self.pdf_hash:
+            return
+        candidates = [candidate.to_dict() for candidate in action.decision.candidates]
+        self.db.save_scanner_event(
+            self.pdf_hash,
+            ScannerEvent(
+                scan_id=action.scan_id,
+                status=status or action.decision.status,
+                confidence=action.decision.confidence,
+                unit=action.decision.unit,
+                carrier=action.decision.carrier,
+                tracking=action.decision.tracking,
+                last4=action.decision.tracking[-4:] if action.decision.tracking else "",
+                item_id=action.item_id,
+                message=action.decision.message,
+                details={"candidates": candidates},
+            ),
+        )
+
+    def _undo_scanner_action(self, scan_id: str, *, save_event: bool = True) -> None:
+        if not self.pdf_hash:
+            return
+        history = self.scanner_undo.pop(scan_id, None)
+        if history:
+            for item_id, previous in history["audited"].items():
+                entry = next((entry for entry in self.entries if entry.item_id == item_id), None)
+                if entry:
+                    entry.audited = previous
+                    self.db.set_state(self.pdf_hash, item_id, previous)
+            if history["package_tracking"]:
+                self.db.delete_package_error_by_tracking(self.pdf_hash, history["package_tracking"])
+            for unit, tracking in history["double_rows"]:
+                self.db.delete_double_logged_by_tracking(self.pdf_hash, unit, tracking)
+            for alert_key in history["alerts"]:
+                self.db.delete_scanner_alert(self.pdf_hash, alert_key)
+        if save_event:
+            previous_events = [
+                event for event in self.db.load_scanner_events(self.pdf_hash) if event.scan_id == scan_id
+            ]
+            if previous_events:
+                event = previous_events[0]
+                event.status = "undone"
+                event.message = "Scanner action undone."
+                self.db.save_scanner_event(self.pdf_hash, event)
+
+    def _refresh_alerts(self) -> None:
+        if not self.pdf_hash:
+            self.alerts_table.setRowCount(0)
+            self.open_alert_count = 0
+            self.scanner_item_states = {}
+            return
+        alerts = self.db.load_scanner_alerts(self.pdf_hash)
+        self.alerts_table.setRowCount(len(alerts))
+        item_states: dict[str, str] = {}
+        priority = {"review": 1, "warning": 2, "error": 3}
+        summary: Counter[str] = Counter()
+        for row, alert in enumerate(alerts):
+            values = [
+                "Resolved" if alert.resolved else "Open",
+                alert.kind.replace("_", " ").title(),
+                alert.unit,
+                alert.carrier,
+                alert.tracking,
+                alert.last4,
+                alert.message,
+                alert.created_at.replace("T", " ")[:19],
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(ALERT_KEY_ROLE, alert.alert_key)
+                if not alert.resolved and alert.severity in ALERT_COLORS:
+                    item.setBackground(ALERT_COLORS[alert.severity])
+                self.alerts_table.setItem(row, column, item)
+            if not alert.resolved:
+                summary[alert.kind] += 1
+                for item_id in alert.item_ids:
+                    current = item_states.get(item_id)
+                    if current is None or priority[alert.severity] > priority[current]:
+                        item_states[item_id] = alert.severity
+        self.scanner_item_states = item_states
+        self.open_alert_count = sum(summary.values())
+        self.scanner_coordinator.set_alert_summary(dict(summary))
+        self._update_summary()
+
+    def _set_selected_alerts_resolved(self, resolved: bool) -> None:
+        if not self.pdf_hash:
+            return
+        rows = {index.row() for index in self.alerts_table.selectedIndexes()}
+        for row in rows:
+            marker = self.alerts_table.item(row, 0)
+            if marker:
+                self.db.resolve_scanner_alert(
+                    self.pdf_hash,
+                    marker.data(ALERT_KEY_ROLE),
+                    resolved,
+                )
+        self._refresh_alerts()
+        self._refresh_table()
+
+    def resolve_selected_alerts(self) -> None:
+        self._set_selected_alerts_resolved(True)
+
+    def reopen_selected_alerts(self) -> None:
+        self._set_selected_alerts_resolved(False)
 
     # ---------------------------------------------------------------- clears
     def clear_current_audit(self) -> None:
@@ -652,6 +1164,9 @@ class PackageAuditApp(QMainWindow):
             entry.audited = False
         self._populate_errors_table([])
         self._populate_double_table([])
+        self.scanner_undo.clear()
+        self.scanner_coordinator.configure(self.pdf_hash, self.entries, reset_scans=True)
+        self._refresh_alerts()
         self._refresh_table()
         self.statusBar().showMessage("Current audit data cleared.", 5000)
 
@@ -750,6 +1265,11 @@ class PackageAuditApp(QMainWindow):
                 output_pdf_path=Path(output_str),
                 entries=self.entries,
                 highlight_color=self.highlight_color,
+                entry_colors={
+                    item_id: ALERT_COLORS[state]
+                    for item_id, state in self.scanner_item_states.items()
+                    if state in ALERT_COLORS
+                },
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
             QMessageBox.critical(self, "Export failed", f"Could not write highlighted PDF:\n{exc}")
@@ -778,6 +1298,7 @@ class PackageAuditApp(QMainWindow):
         self.statusBar().showMessage(f"Exported {Path(path_str).name}", 5000)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.stop_phone_scanner()
         self.save_error_rows()
         self.save_double_rows()
         self.db.close()

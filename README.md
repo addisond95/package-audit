@@ -38,6 +38,16 @@ transcription work by capturing audit observations directly as structured data.
 - Bulk *Mark All Visible* / *Unmark All Visible* (respect the active search/filter)
 - Progress is saved automatically and resumes when the same PDF is reopened
 
+**Phone scanner (local and free)**
+- Pair a phone browser over the same Wi‑Fi using a temporary six-digit code or QR code
+- Scan QR codes, 1D/2D barcodes, or photograph a printed package label
+- Decode barcodes locally with ZXing and printed text locally with Tesseract OCR
+- Match only tracking number, unit, and any listed resident surname; carrier is never a match signal
+- Automatically mark confident matches, ask "Do you mean?" for uncertain matches, and log reliable
+  barcode no-matches as `Not logged`
+- Detect duplicate tracking across units, create alerts, preserve full tracking values, and support undo
+- Learn confidence weights and recurring OCR corrections from confirmations and rejections
+
 **Manual report sections**
 - *Package Errors* — `Unit | Location | Carrier | Last 4 | Note`
 - *Double Logged Packages* — `Unit | Location | Carrier | Last 4`
@@ -91,6 +101,9 @@ This project uses [uv](https://docs.astral.sh/uv/).
 # Install dependencies into a virtual environment
 uv sync
 
+# One-time local OCR installation on macOS
+brew install tesseract
+
 # Launch the application
 uv run python main.py
 ```
@@ -128,6 +141,26 @@ flowchart LR
    focus, and the bulk actions to clear large groups quickly.
 3. **Record** any package errors and double‑logged packages in their tabs.
 4. **Export** the audit report, CSV, or a highlighted PDF.
+
+### Phone scanner workflow
+
+1. Open an audit PDF on the desktop.
+2. Click **Start Phone Scanner**.
+3. Scan the displayed QR code with a phone on the same Wi‑Fi, or enter the shown URL and pairing code.
+4. Tap **Scan package** and photograph the label. The image is processed in memory and is not saved.
+5. High-confidence matches are marked in the desktop audit. Medium-confidence results ask for a choice.
+  Reliable barcodes absent from the audit are logged in Package Errors as `Not logged`.
+6. Duplicate tracking produces a Double Logged row and an orange alert. Red means not logged, yellow means
+  review, and the ordinary audit highlight remains green.
+
+The phone scanner binds to the local network only, requires a temporary pairing code, uses a signed browser
+session plus CSRF checks, and does not require internet access or a paid service. Keep the phone and computer
+on a trusted private Wi‑Fi network. If OCR is unavailable, barcode and QR scanning still work and the pairing
+screen reports the missing OCR capability.
+
+The pairing code expires after 15 minutes; an already paired phone remains connected until the scanner stops
+or a different PDF is loaded. macOS may ask whether Python can accept incoming network connections the first
+time the scanner starts. Allow it only on a trusted private network.
 
 ### Keyboard shortcuts
 
@@ -168,17 +201,20 @@ Source: Event log _ BuildingLink.pdf
 2. PACKAGE ERRORS
 ==================================================
 
-1701S | BIN | ONTRAC | 6651 | wrong unit
+1701S | BIN | ONTRAC |  | 6651 | wrong unit
+9901S |  | PKG | 1Z000ZZ00000000001 | 0001 | Not logged
 
 ==================================================
 3. DOUBLE LOGGED PACKAGES
 ==================================================
 
-0201S | BIN | AMZ | 5561
+0201S | BIN | AMZ |  | 5561
+1802S |  | UPS | 1Z999AA10123456784 | 6784
 ```
 
 - **Section 1** is generated from packages left unchecked during the audit.
-- **Sections 2 and 3** come from the manual entry tables.
+- **Sections 2 and 3** come from the manual entry tables and automatic scanner records. Their columns are
+  `Unit | Location | Carrier | Tracking | Last 4` plus the Package Errors note.
 
 ---
 
@@ -188,8 +224,8 @@ Audit progress is stored in a local SQLite database keyed by a hash of the PDF
 contents (`~/.package_audit/audit_state.sqlite3`). Reopening the same export
 restores checked rows and manual entries automatically.
 
-- **Clear Current Audit** — removes checked rows, package errors, and
-  double‑logged rows for the loaded PDF.
+- **Clear Current Audit** — removes checked rows, package errors, double‑logged rows,
+  scanner events, and alerts for the loaded PDF.
 - **Clear Manual Sections** — removes only the package errors and double‑logged
   rows, keeping package verification intact.
 
@@ -197,10 +233,12 @@ restores checked rows and manual entries automatically.
 
 ## Roadmap
 
-**v0.4 (current)** — complete manual audit workflow: parsing, verification,
-search/filter, bulk actions, manual report sections, persistence, and exports.
-This release is intended for active testing and workflow refinement.
+**v0.5 (current)** — local phone QR/barcode/OCR scanner, confidence review,
+automatic Not logged and duplicate records, alerts, undo, and adaptive matching,
+while preserving the complete manual workflow and exports.
 
-**v1.0 (planned)** — production hardening: real‑world audit validation, parser
-and UI polish, and packaging for non‑technical users. No camera, OCR, machine
-learning, or BuildingLink integration is planned for the first stable release.
+**v0.4** — complete manual audit workflow: parsing, verification, search/filter,
+bulk actions, manual report sections, persistence, and exports.
+
+**v1.0 (planned)** — additional real-label validation, threshold tuning from
+feedback history, UI polish, and packaging for non-technical users.

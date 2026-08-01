@@ -7,6 +7,7 @@ by the database, reporting, and test layers without the GUI stack.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from app.constants import CARRIER_ALIASES, MISSING_LAST4
 
@@ -54,6 +55,7 @@ class PackageError:
     carrier: str
     last4: str
     note: str
+    tracking: str = ""
 
 
 @dataclass
@@ -64,6 +66,41 @@ class DoubleLoggedPackage:
     location: str
     carrier: str
     last4: str
+    tracking: str = ""
+
+
+@dataclass
+class ScannerAlert:
+    """A deduplicated scanner condition shown on desktop and phone."""
+
+    alert_key: str
+    kind: str
+    severity: str
+    unit: str = ""
+    carrier: str = "PKG"
+    tracking: str = ""
+    last4: str = MISSING_LAST4
+    message: str = ""
+    item_ids: tuple[str, ...] = ()
+    resolved: bool = False
+    created_at: str = ""
+
+
+@dataclass
+class ScannerEvent:
+    """One processed phone scan, excluding the source image."""
+
+    scan_id: str
+    status: str
+    confidence: float
+    unit: str = ""
+    carrier: str = "PKG"
+    tracking: str = ""
+    last4: str = MISSING_LAST4
+    item_id: str = ""
+    message: str = ""
+    details: dict[str, Any] | None = None
+    created_at: str = ""
 
 
 def normalize_unit(unit: str) -> str:
@@ -91,6 +128,12 @@ def normalize_last4(last4: str) -> str:
     if not value or value.lower() == "nan":
         return MISSING_LAST4
     return value[-4:].upper()
+
+
+def normalize_tracking(tracking: str) -> str:
+    return "".join(
+        character for character in tracking.upper() if "A" <= character <= "Z" or "0" <= character <= "9"
+    )
 
 
 def unit_sort_key(unit: str) -> tuple[int, str]:

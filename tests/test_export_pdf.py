@@ -155,6 +155,29 @@ def test_all_duplicate_unit_entries_receive_separate_highlights(tmp_path):
         assert annotations[0].opacity == pytest.approx(0.65)
         assert annotations[0].colors["fill"] == pytest.approx([10 / 255, 20 / 255, 30 / 255], abs=0.01)
 
+    def test_scanner_entry_color_overrides_audited_highlight(tmp_path):
+        source = tmp_path / "source.pdf"
+        output = tmp_path / "highlighted.pdf"
+        entry = _entry("one", "UPS - #1 - TRACK1111", audited=True)
+
+        with fitz.open() as document:
+            page = document.new_page()
+            page.insert_text((50, 100), "1701S Resident one UPS - #1 - TRACK1111")
+            document.save(source)
+
+        warning = QColor(245, 166, 35, 95)
+        write_highlighted_pdf(
+            source,
+            output,
+            [entry],
+            QColor(80, 200, 120, 95),
+            {entry.item_id: warning},
+        )
+
+        with fitz.open(output) as document:
+            annotation = next(document[0].annots())
+            assert annotation.colors["fill"] == pytest.approx([245 / 255, 166 / 255, 35 / 255], abs=0.01)
+
 
 def test_stale_page_index_is_ignored(tmp_path):
     source = tmp_path / "source.pdf"
