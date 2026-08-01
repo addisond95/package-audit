@@ -67,6 +67,25 @@ def test_double_logged_round_trip(db):
     assert (rows[0].unit, rows[0].carrier, rows[0].last4) == ("0201S", "AMZ", "5561")
 
 
+def test_legacy_package_type_loads_as_pkg(db):
+    with db.conn:
+        db.conn.execute(
+            """
+            INSERT INTO package_errors (pdf_hash, unit, location, carrier, last4, note)
+            VALUES ('hash-a', '708', 'bin', 'PACKAGE', '1234', 'legacy')
+            """
+        )
+        db.conn.execute(
+            """
+            INSERT INTO double_logged (pdf_hash, unit, location, carrier, last4)
+            VALUES ('hash-a', '405', 'bb', 'package', '5678')
+            """
+        )
+
+    assert db.load_package_errors("hash-a")[0].carrier == "PKG"
+    assert db.load_double_logged("hash-a")[0].carrier == "PKG"
+
+
 def test_clear_all_for_pdf_removes_everything(db):
     db.set_state("hash-a", "item-1", True)
     db.replace_package_errors("hash-a", [PackageError("1701S", "BIN", "USPS", "6651", "note")])

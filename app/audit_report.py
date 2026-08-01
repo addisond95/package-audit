@@ -20,46 +20,19 @@ from app.models import (
     unit_sort_key,
 )
 
-_INDENT = "  "
-
-
-def _format_table(headers: list[str], rows: list[list[str]]) -> list[str]:
-    """Render *rows* as a fixed-width text table under *headers*.
-
-    Column widths are derived from the widest value in each column so every
-    row lines up cleanly.  The last column is never padded — it holds free-text
-    like notes that should flow naturally.
-    """
-    if not rows:
-        return [f"{_INDENT}None"]
-
-    col_count = len(headers)
-    # Seed widths from the header labels.
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for col, cell in enumerate(row):
-            widths[col] = max(widths[col], len(cell))
-
-    def render_row(cells: list[str], pad: bool = True) -> str:
-        parts: list[str] = []
-        for col, cell in enumerate(cells):
-            is_last = col == col_count - 1
-            parts.append(cell if (is_last or not pad) else cell.ljust(widths[col]))
-        return _INDENT + "  ".join(parts).rstrip()
-
-    dividers = ["-" * widths[col] for col in range(col_count)]
-
-    out: list[str] = []
-    out.append(render_row(headers))
-    out.append(render_row(dividers))
-    for row in rows:
-        out.append(render_row(row))
-    return out
+_SECTION_RULE = "=" * 50
 
 
 def _section(number: int, title: str) -> str:
     label = f"{number}. {title}"
-    return f"{label}\n{'─' * len(label)}"
+    return f"{_SECTION_RULE}\n{label}\n{_SECTION_RULE}"
+
+
+def _format_rows(rows: list[list[str]]) -> list[str]:
+    """Render report records with visible delimiters and no embedded newlines."""
+    if not rows:
+        return ["None"]
+    return [" | ".join(" ".join(cell.split()) for cell in row) for row in rows]
 
 
 def make_audit_report(
@@ -92,12 +65,8 @@ def make_audit_report(
     lines.append(_section(1, "PICKED UP BUT NOT CLOSED OUT"))
     lines.append("")
     lines.extend(
-        _format_table(
-            ["UNIT", "LAST 4"],
-            [
-                [normalize_unit(e.unit), normalize_last4(e.last4)]
-                for e in unchecked
-            ],
+        _format_rows(
+            [[normalize_unit(e.unit), normalize_last4(e.last4)] for e in unchecked],
         )
     )
 
@@ -106,8 +75,7 @@ def make_audit_report(
     lines.append(_section(2, "PACKAGE ERRORS"))
     lines.append("")
     lines.extend(
-        _format_table(
-            ["UNIT", "LOCATION", "CARRIER", "LAST 4", "NOTE"],
+        _format_rows(
             [
                 [
                     normalize_unit(r.unit),
@@ -126,8 +94,7 @@ def make_audit_report(
     lines.append(_section(3, "DOUBLE LOGGED PACKAGES"))
     lines.append("")
     lines.extend(
-        _format_table(
-            ["UNIT", "LOCATION", "CARRIER", "LAST 4"],
+        _format_rows(
             [
                 [
                     normalize_unit(r.unit),

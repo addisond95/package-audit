@@ -33,6 +33,7 @@ CARRIER_ALIASES = {
     "FEDX": "FEDEX",
     "FDX": "FEDEX",
     "AMAZON": "AMZ",
+    "PACKAGE": "PKG",
     "PHARM": "RX",
     "PHARMACY": "RX",
     "RX": "RX",

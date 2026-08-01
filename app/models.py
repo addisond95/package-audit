@@ -99,7 +99,7 @@ def unit_sort_key(unit: str) -> tuple[int, str]:
     suffix = ""
 
     for char in unit:
-        if char.isdigit():
+        if "0" <= char <= "9":
             digits += char
         else:
             suffix += char
@@ -129,8 +129,16 @@ def extract_last4(package_text: str) -> str:
     candidates = list(reversed(parts))
 
     location_words = {
-        "BIN", "BB", "CG", "CAGE", "UG", "ALPHA", "FCR",
-        "SHELF", "FRONT DESK", "LEFT AT THE DESK"
+        "BIN",
+        "BB",
+        "CG",
+        "CAGE",
+        "UG",
+        "ALPHA",
+        "FCR",
+        "SHELF",
+        "FRONT DESK",
+        "LEFT AT THE DESK",
     }
 
     for candidate in candidates:

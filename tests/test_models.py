@@ -22,6 +22,7 @@ def test_normalize_carrier_resolves_aliases():
     assert normalize_carrier("fedx") == "FEDEX"
     assert normalize_carrier("fdx") == "FEDEX"
     assert normalize_carrier("amazon") == "AMZ"
+    assert normalize_carrier("package") == "PKG"
     assert normalize_carrier("rx") == "RX"
     assert normalize_carrier("ups") == "UPS"
 
@@ -57,6 +58,10 @@ def test_extract_last4_returns_nan_when_no_tracking():
 def test_unit_sort_key_orders_numerically():
     units = ["3207S", "0205S", "1708S", "1708N"]
     assert sorted(units, key=unit_sort_key) == ["0205S", "1708N", "1708S", "3207S"]
+
+
+def test_unit_sort_key_treats_non_ascii_digit_like_characters_as_text():
+    assert unit_sort_key("²A") == (999999, "²A")
 
 
 def test_audit_entry_last4_and_search_text():

@@ -24,6 +24,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Run lint
+        run: uv run ruff check .
+
       - name: Build with PyInstaller
         run: uv run pyinstaller package-audit-windows.spec --noconfirm
 

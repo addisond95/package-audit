@@ -687,13 +687,17 @@ class PackageAuditApp(QMainWindow):
         if not path_str:
             return
 
-        write_audit_report(
-            output_path=Path(path_str),
-            entries=self.entries,
-            package_errors=self.collect_error_rows(),
-            double_logged=self.collect_double_rows(),
-            source_pdf_name=self.pdf_path.name if self.pdf_path else "",
-        )
+        try:
+            write_audit_report(
+                output_path=Path(path_str),
+                entries=self.entries,
+                package_errors=self.collect_error_rows(),
+                double_logged=self.collect_double_rows(),
+                source_pdf_name=self.pdf_path.name if self.pdf_path else "",
+            )
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", f"Could not write audit report:\n{exc}")
+            return
         self._exported(path_str)
 
     def export_csv(self) -> None:
@@ -705,22 +709,28 @@ class PackageAuditApp(QMainWindow):
         if not path_str:
             return
 
-        with open(path_str, "w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["audited", "unit", "last4", "resident", "package", "tower", "timestamp", "page"])
-            for entry in self.entries:
+        try:
+            with open(path_str, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
                 writer.writerow(
-                    [
-                        "yes" if entry.audited else "no",
-                        entry.unit,
-                        entry.last4,
-                        entry.resident,
-                        entry.package,
-                        entry.tower,
-                        entry.timestamp,
-                        entry.page_index + 1,
-                    ]
+                    ["audited", "unit", "last4", "resident", "package", "tower", "timestamp", "page"]
                 )
+                for entry in self.entries:
+                    writer.writerow(
+                        [
+                            "yes" if entry.audited else "no",
+                            entry.unit,
+                            entry.last4,
+                            entry.resident,
+                            entry.package,
+                            entry.tower,
+                            entry.timestamp,
+                            entry.page_index + 1,
+                        ]
+                    )
+        except (OSError, csv.Error) as exc:
+            QMessageBox.critical(self, "Export failed", f"Could not write audit CSV:\n{exc}")
+            return
         self._exported(path_str)
 
     def export_highlighted_pdf(self) -> None:
@@ -760,9 +770,7 @@ class PackageAuditApp(QMainWindow):
         return True
 
     def _confirm(self, title: str, message: str) -> bool:
-        answer = QMessageBox.question(
-            self, title, message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
+        answer = QMessageBox.question(self, title, message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return answer == QMessageBox.Yes
 
     def _exported(self, path_str: str) -> None:

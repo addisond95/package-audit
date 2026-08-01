@@ -73,9 +73,7 @@ class AuditDatabase:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_package_errors_hash ON package_errors (pdf_hash)"
             )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_double_logged_hash ON double_logged (pdf_hash)"
-            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_double_logged_hash ON double_logged (pdf_hash)")
 
     def load_state(self, pdf_hash: str) -> dict[str, bool]:
         rows = self.conn.execute(
@@ -125,11 +123,11 @@ class AuditDatabase:
 
         return [
             PackageError(
-                unit=unit,
-                location=location,
-                carrier=carrier,
-                last4=last4,
-                note=note,
+                unit=normalize_unit(unit),
+                location=normalize_location(location),
+                carrier=normalize_carrier(carrier),
+                last4=normalize_last4(last4),
+                note=note.strip(),
             )
             for unit, location, carrier, last4, note in rows
         ]
@@ -168,10 +166,10 @@ class AuditDatabase:
 
         return [
             DoubleLoggedPackage(
-                unit=unit,
-                location=location,
-                carrier=carrier,
-                last4=last4,
+                unit=normalize_unit(unit),
+                location=normalize_location(location),
+                carrier=normalize_carrier(carrier),
+                last4=normalize_last4(last4),
             )
             for unit, location, carrier, last4 in rows
         ]
