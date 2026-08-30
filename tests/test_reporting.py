@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from app.audit_report import _format_rows, make_audit_report
+from pathlib import Path
+
+import pytest
+
+from app.audit_report import _format_rows, make_audit_report, write_audit_report
 from app.models import AuditEntry, DoubleLoggedPackage, PackageError
 
 
@@ -84,6 +88,14 @@ def test_report_includes_full_tracking_for_scanner_rows():
     assert "1802S |  | UPS | 1Z999AA10123456784 | 6784" in report
 
 
+def test_report_derives_last_four_from_tracking_immediately():
+    errors = [PackageError("1701S", "", "UPS", "", "Not logged", "1Z999AA10123456784")]
+
+    report = make_audit_report([], errors, [])
+
+    assert "1701S |  | UPS | 1Z999AA10123456784 | 6784 | Not logged" in report
+
+
 def test_report_uses_ascii_section_rules():
     errors = [PackageError("1701S", "BIN", "ONTRAC", "6651", "wrong unit")]
     doubles = [DoubleLoggedPackage("0201S", "BIN", "AMZ", "5561")]
@@ -98,3 +110,19 @@ def test_report_shows_none_for_empty_sections():
     report = make_audit_report([], [], [])
     assert report.count("None") == 3
     assert "PACKAGE AUDIT REPORT" in report
+
+
+def test_failed_report_export_preserves_existing_file(tmp_path, monkeypatch):
+    output = tmp_path / "report.txt"
+    output.write_text("existing report", encoding="utf-8")
+
+    def fail_write(_self, *_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", fail_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        write_audit_report(output, [], [], [])
+
+    with output.open(encoding="utf-8") as handle:
+        assert handle.read() == "existing report"

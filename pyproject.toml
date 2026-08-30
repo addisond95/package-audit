@@ -15,6 +15,9 @@ dependencies = [
     "zxing-cpp>=2.3",
 ]
 
+[project.scripts]
+package-audit = "app.main_window:main"
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
@@ -24,6 +27,8 @@ packages = ["app"]
 
 [dependency-groups]
 dev = [
+    "bandit>=1.8",
+    "pip-audit>=2.9",
     "pyinstaller>=6.21.0",
     "pytest>=8.0",
     "ruff>=0.6",

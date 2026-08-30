@@ -130,6 +130,18 @@ def normalize_last4(last4: str) -> str:
     return value[-4:].upper()
 
 
+def resolve_last4(last4: str, tracking: str = "") -> str:
+    """Normalize an explicit last-four value, falling back to full tracking.
+
+    Manual rows allow the complete tracking number to be entered without also
+    typing its last four. Keeping that derivation in the domain layer ensures
+    the UI, database, and exports all render the same value immediately.
+    """
+    value = last4.strip()
+    source = tracking if not value or value.casefold() == "nan" else value
+    return normalize_last4(source)
+
+
 def normalize_tracking(tracking: str) -> str:
     return "".join(
         character for character in tracking.upper() if "A" <= character <= "Z" or "0" <= character <= "9"

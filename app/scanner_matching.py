@@ -84,18 +84,27 @@ def extract_tracking_values(text: str, *, trusted: bool = False) -> tuple[str, .
     if trusted:
         add(text)
 
-    for match in _CODE_RE.finditer(text.upper()):
-        add(match.group())
-
     for line in text.splitlines():
-        if re.search(r"track(?:ing)?(?:\s*(?:no|number))?\s*[:#-]?", line, re.IGNORECASE):
+        if re.search(r"track(?:ing)?(?:\s*(?:no|number|num))?\s*[:#=?-]?", line, re.IGNORECASE):
             suffix = re.sub(
-                r"^.*?track(?:ing)?(?:\s*(?:no|number))?\s*[:#-]?",
+                r"^.*track(?:ing)?(?:\s*(?:no|number|num))?\s*[:#=?-]?",
                 "",
                 line,
                 flags=re.IGNORECASE,
             )
             add(suffix)
+            continue
+
+        # OCR often inserts spaces inside a printed tracking number. Rejoin a
+        # line only when every fragment contains a digit, which avoids turning
+        # ordinary names and address labels into identifiers.
+        fragments = _OCR_TOKEN_RE.findall(line.upper())
+        if len(fragments) > 1 and all(any(character.isdigit() for character in part) for part in fragments):
+            add("".join(fragments))
+            continue
+
+        for match in _CODE_RE.finditer(line.upper()):
+            add(match.group())
 
     return tuple(found)
 
@@ -148,6 +157,25 @@ class ScanObservation:
     def barcode_trackings(self) -> tuple[str, ...]:
         values: list[str] = []
         for barcode in self.barcodes:
+            for value in extract_tracking_values(barcode, trusted=True):
+                if value not in values:
+                    values.append(value)
+        return tuple(values)
+
+    @property
+    def reliable_barcode_trackings(self) -> tuple[str, ...]:
+        """Return barcode values safe to auto-log when no audit match exists.
+
+        Retail EAN/UPC product codes are common on package contents but are not
+        shipping identifiers. They may still confirm an exact value already in
+        the audit, but they must never create a new ``Not logged`` record.
+        """
+        values: list[str] = []
+        for index, barcode in enumerate(self.barcodes):
+            barcode_format = self.barcode_formats[index] if index < len(self.barcode_formats) else ""
+            upper_format = barcode_format.upper()
+            if "EAN" in upper_format or "UPC" in upper_format:
+                continue
             for value in extract_tracking_values(barcode, trusted=True):
                 if value not in values:
                     values.append(value)
@@ -350,16 +378,46 @@ class AdaptiveMatchModel:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> AdaptiveMatchModel:
-        if not value:
+        if not isinstance(value, dict) or not value:
             return cls()
+
+        def number(name: str, default: float) -> float:
+            try:
+                return float(value.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        def aliases(name: str) -> dict[str, dict[str, int]]:
+            raw = value.get(name, {})
+            if not isinstance(raw, dict):
+                return {}
+            cleaned: dict[str, dict[str, int]] = {}
+            for observed, choices in raw.items():
+                if not isinstance(observed, str) or not isinstance(choices, dict):
+                    continue
+                cleaned[observed] = {
+                    actual: count
+                    for actual, count in choices.items()
+                    if isinstance(actual, str) and isinstance(count, int) and count >= 0
+                }
+            return cleaned
+
         weights = dict(_DEFAULT_WEIGHTS)
-        weights.update({name: float(weight) for name, weight in value.get("weights", {}).items()})
+        raw_weights = value.get("weights", {})
+        if isinstance(raw_weights, dict):
+            for name, weight in raw_weights.items():
+                if not isinstance(name, str):
+                    continue
+                try:
+                    weights[name] = float(weight)
+                except (TypeError, ValueError):
+                    continue
         return cls(
-            bias=float(value.get("bias", -4.0)),
+            bias=number("bias", -4.0),
             weights=weights,
-            examples=int(value.get("examples", 0)),
-            unit_aliases=value.get("unit_aliases", {}),
-            surname_aliases=value.get("surname_aliases", {}),
+            examples=max(0, int(number("examples", 0.0))),
+            unit_aliases=aliases("unit_aliases"),
+            surname_aliases=aliases("surname_aliases"),
         )
 
 
@@ -486,6 +544,24 @@ class PackageMatcher:
                 related_item_ids=tuple(record.item_id for record in duplicate_records),
             )
 
+        matched_record_ids = {
+            record.item_id
+            for tracking in observation.trackings
+            for record in self.tracking_index.get(tracking, [])
+        }
+        if len(matched_record_ids) > 1:
+            ranked = self.rank(observation)
+            candidates = tuple(candidate for candidate in ranked if candidate.item_id in matched_record_ids)
+            return ScanDecision(
+                status="review",
+                confidence=candidates[0].confidence if candidates else 0.0,
+                message="Multiple barcodes match different packages. Choose the correct package.",
+                candidates=candidates,
+                carrier=observation.carrier,
+                scan_key=observation.scan_key,
+                related_item_ids=tuple(candidate.item_id for candidate in candidates),
+            )
+
         exact_tracking_record = next(
             (
                 record
@@ -535,13 +611,16 @@ class PackageMatcher:
         )
         second_score = ranked[1].confidence if len(ranked) > 1 else 0.0
         exact_barcode_match = bool(best and best.features["barcode_tracking_exact"])
+        reliable_ocr = observation.ocr_confidence >= 50.0
         exact_tracking_confirmed = bool(
             best
+            and reliable_ocr
             and best.features["tracking_exact"]
             and (best.features["unit_exact"] or best.features["surname_exact"])
         )
         last4_confirmed = bool(
             best
+            and reliable_ocr
             and best.features["tracking_last4"]
             and best.features["unit_exact"]
             and best.features["surname_exact"]
@@ -568,15 +647,16 @@ class PackageMatcher:
                 related_item_ids=(best.item_id,),
             )
 
-        all_barcodes_unmatched = bool(observation.barcode_trackings) and not any(
-            value in self.tracking_index for value in observation.barcode_trackings
+        reliable_barcodes = observation.reliable_barcode_trackings
+        all_barcodes_unmatched = bool(reliable_barcodes) and not any(
+            value in self.tracking_index for value in reliable_barcodes
         )
         ocr_confirmed_barcode = next(
-            (value for value in observation.barcode_trackings if value in observation.ocr_trackings),
+            (value for value in reliable_barcodes if value in observation.ocr_trackings),
             "",
         )
         reliable_unmatched_tracking = ocr_confirmed_barcode or (
-            observation.barcode_trackings[0] if len(observation.barcode_trackings) == 1 else ""
+            reliable_barcodes[0] if len(reliable_barcodes) == 1 else ""
         )
         if all_barcodes_unmatched and reliable_unmatched_tracking:
             observed_unit = next(iter(sorted(observation.unit_tokens)), "")

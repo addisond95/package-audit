@@ -5,8 +5,9 @@ from __future__ import annotations
 import csv
 import io
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from app.models import normalize_carrier
 from app.scanner_matching import ScanObservation
 
+# Tesseract is resolved from PATH or fixed trusted paths and is never run through a shell.
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_OCR_DIMENSION = 2600
@@ -23,6 +25,8 @@ _OCR_SLOTS = threading.BoundedSemaphore(2)
 _TESSERACT_LOCATIONS = (
     "/opt/homebrew/bin/tesseract",
     "/usr/local/bin/tesseract",
+    "C:/Program Files/Tesseract-OCR/tesseract.exe",
+    "C:/Program Files (x86)/Tesseract-OCR/tesseract.exe",
 )
 
 
@@ -72,12 +76,16 @@ def _open_image(image_bytes: bytes) -> Image.Image:
 
     try:
         image = Image.open(io.BytesIO(image_bytes))
-        image.load()
     except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError) as exc:
         raise ScanImageError("The upload is not a supported image.") from exc
 
     if image.width * image.height > MAX_IMAGE_PIXELS:
         raise ScanImageError("The image dimensions are too large.")
+    try:
+        image.load()
+    except (Image.DecompressionBombError, OSError, ValueError) as exc:
+        raise ScanImageError("The upload is not a supported image.") from exc
+
     if image.width < 80 or image.height < 80:
         raise ScanImageError("The image is too small to scan.")
 
@@ -121,7 +129,7 @@ def _run_tesseract_once(
     executable: str,
     timeout: float,
 ) -> tuple[str, float]:
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603
         [executable, "stdin", "stdout", "-l", "eng", "--psm", "6", "tsv"],
         input=_prepare_ocr_image(image),
         capture_output=True,
@@ -164,16 +172,29 @@ def _run_tesseract(image: Image.Image, timeout: float = 20.0) -> tuple[str, floa
 
     try:
         with _OCR_SLOTS:
-            best = _run_tesseract_once(image, executable, timeout)
-            if best[1] < 60.0:
-                for angle in (90, 180, 270):
+            deadline = time.monotonic() + timeout
+            best = ("", 0.0)
+            completed = False
+            for angle in (0, 90, 180, 270):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                candidate_image = image if angle == 0 else image.rotate(angle, expand=True, fillcolor="white")
+                try:
                     candidate = _run_tesseract_once(
-                        image.rotate(angle, expand=True, fillcolor="white"),
+                        candidate_image,
                         executable,
-                        timeout,
+                        min(8.0, remaining),
                     )
-                    if candidate[1] > best[1]:
-                        best = candidate
+                except subprocess.TimeoutExpired:
+                    continue
+                completed = True
+                if candidate[1] > best[1]:
+                    best = candidate
+                if best[1] >= 60.0:
+                    break
+            if not completed:
+                raise ScanImageError("Local OCR timed out. Retake a closer, sharper photo.")
             return best
     except (OSError, subprocess.SubprocessError) as exc:
         raise ScanImageError(f"Local OCR failed: {exc}") from exc

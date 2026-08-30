@@ -7,14 +7,32 @@ each audited package row.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from PySide6.QtGui import QColor
 
+from app.export_utils import atomic_output_path
 from app.models import AuditEntry
 
 _PACKAGE_TOKEN_RE = re.compile(r"[A-Z0-9]{4,}", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class HighlightExportResult:
+    """Completeness information for a highlighted-PDF export."""
+
+    highlighted_item_ids: tuple[str, ...]
+    unresolved_item_ids: tuple[str, ...]
+
+    @property
+    def highlighted_count(self) -> int:
+        return len(self.highlighted_item_ids)
+
+    @property
+    def unresolved_count(self) -> int:
+        return len(self.unresolved_item_ids)
 
 
 def _resolve_entry_matches(
@@ -93,43 +111,58 @@ def write_highlighted_pdf(
     entries: list[AuditEntry],
     highlight_color: QColor,
     entry_colors: dict[str, QColor] | None = None,
-) -> None:
+) -> HighlightExportResult:
     """Write a copy of the source PDF with audited rows highlighted."""
+    if input_pdf_path.resolve() == output_pdf_path.resolve():
+        raise ValueError("Choose an output path different from the source PDF.")
     entry_colors = entry_colors or {}
+    target_item_ids = tuple(
+        dict.fromkeys(entry.item_id for entry in entries if entry.audited or entry.item_id in entry_colors)
+    )
+    highlighted_item_ids: set[str] = set()
 
     entries_by_page: dict[int, list[AuditEntry]] = {}
     for entry in entries:
         entries_by_page.setdefault(entry.page_index, []).append(entry)
 
-    with fitz.open(str(input_pdf_path)) as doc:
-        for page_index, page_entries in entries_by_page.items():
-            if page_index < 0 or page_index >= len(doc):
-                continue
-            page = doc[page_index]
-            page_rect = page.rect
-            resolved_entries = _resolve_entry_matches(page, page_entries, page.get_textpage())
-            row_tops = sorted({match.y0 for _, match in resolved_entries})
-
-            for entry, match in resolved_entries:
-                color = entry_colors.get(entry.item_id)
-                if color is None and entry.audited:
-                    color = highlight_color
-                if color is None:
+    with atomic_output_path(output_pdf_path) as temporary_path:
+        with fitz.open(str(input_pdf_path)) as doc:
+            for page_index, page_entries in entries_by_page.items():
+                if page_index < 0 or page_index >= len(doc):
                     continue
+                page = doc[page_index]
+                page_rect = page.rect
+                resolved_entries = _resolve_entry_matches(page, page_entries, page.get_textpage())
+                row_tops = sorted({match.y0 for _, match in resolved_entries})
 
-                rgb = (color.red() / 255, color.green() / 255, color.blue() / 255)
-                opacity = max(0.15, min(0.65, color.alpha() / 255))
+                for entry, match in resolved_entries:
+                    color = entry_colors.get(entry.item_id)
+                    if color is None and entry.audited:
+                        color = highlight_color
+                    if color is None:
+                        continue
 
-                next_row_top = next((top for top in row_tops if top > match.y0 + 1), None)
-                y0 = max(0, match.y0 - 3)
-                y1 = min(page_rect.height, match.y1 + 22)
-                if next_row_top is not None:
-                    y1 = min(y1, next_row_top - 2)
-                rect = fitz.Rect(20, y0, page_rect.width - 20, y1)
+                    rgb = (color.red() / 255, color.green() / 255, color.blue() / 255)
+                    opacity = max(0.15, min(0.65, color.alpha() / 255))
 
-                annot = page.add_rect_annot(rect)
-                annot.set_colors(stroke=rgb, fill=rgb)
-                annot.set_opacity(opacity)
-                annot.update()
+                    next_row_top = next((top for top in row_tops if top > match.y0 + 1), None)
+                    y0 = max(0, match.y0 - 3)
+                    y1 = min(page_rect.height, match.y1 + 22)
+                    if next_row_top is not None:
+                        y1 = min(y1, next_row_top - 2)
+                    rect = fitz.Rect(20, y0, page_rect.width - 20, y1)
 
-        doc.save(str(output_pdf_path))
+                    annot = page.add_rect_annot(rect)
+                    annot.set_colors(stroke=rgb, fill=rgb)
+                    annot.set_opacity(opacity)
+                    annot.update()
+                    highlighted_item_ids.add(entry.item_id)
+
+            doc.save(str(temporary_path))
+
+    return HighlightExportResult(
+        highlighted_item_ids=tuple(item_id for item_id in target_item_ids if item_id in highlighted_item_ids),
+        unresolved_item_ids=tuple(
+            item_id for item_id in target_item_ids if item_id not in highlighted_item_ids
+        ),
+    )

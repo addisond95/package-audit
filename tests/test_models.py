@@ -9,6 +9,7 @@ from app.models import (
     normalize_last4,
     normalize_location,
     normalize_unit,
+    resolve_last4,
     unit_sort_key,
 )
 
@@ -42,6 +43,12 @@ def test_normalize_last4_keeps_last_four_uppercased():
     assert normalize_last4("8572") == "8572"
     assert normalize_last4("tba1968") == "1968"
     assert normalize_last4("ab12") == "AB12"
+
+
+def test_resolve_last4_falls_back_to_full_tracking():
+    assert resolve_last4("", "1Z999AA10123456784") == "6784"
+    assert resolve_last4("NaN", "TBA331958945193") == "5193"
+    assert resolve_last4("AB12", "1Z999AA10123456784") == "AB12"
 
 
 def test_extract_last4_from_buildinglink_examples():

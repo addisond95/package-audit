@@ -7,22 +7,22 @@ resumed simply by reopening the same export.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.constants import MISSING_LAST4
 from app.models import (
     DoubleLoggedPackage,
     PackageError,
     ScannerAlert,
     ScannerEvent,
     normalize_carrier,
-    normalize_last4,
     normalize_location,
     normalize_tracking,
     normalize_unit,
+    resolve_last4,
 )
 
 
@@ -30,8 +30,19 @@ class AuditDatabase:
     """Lightweight data-access layer over a single SQLite file."""
 
     def __init__(self, db_path: Path):
-        self.db_path = db_path
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            self.db_path.parent.chmod(0o700)
+        except OSError:
+            # Permission bits are not consistently supported on Windows.
+            pass
         self.conn = sqlite3.connect(str(db_path))
+        try:
+            os.chmod(self.db_path, 0o600)
+        except OSError:
+            # Permission bits are not consistently supported on Windows.
+            pass
         self.create_tables()
 
     def __enter__(self) -> AuditDatabase:
@@ -46,8 +57,25 @@ class AuditDatabase:
 
     @staticmethod
     def _last4(last4: str, tracking: str) -> str:
-        source = tracking if not last4 or last4 == MISSING_LAST4 else last4
-        return normalize_last4(source)
+        return resolve_last4(last4, tracking)
+
+    @staticmethod
+    def _json_object(value: str) -> dict[str, Any]:
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    @staticmethod
+    def _json_string_list(value: str) -> tuple[str, ...]:
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return ()
+        if not isinstance(decoded, list):
+            return ()
+        return tuple(item for item in decoded if isinstance(item, str))
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -180,6 +208,19 @@ class AuditDatabase:
                 (pdf_hash, item_id, int(audited)),
             )
 
+    def set_states(self, pdf_hash: str, states: list[tuple[str, bool]]) -> None:
+        """Persist several audit-state changes in one transaction."""
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO audit_state (pdf_hash, item_id, audited)
+                VALUES (?, ?, ?)
+                ON CONFLICT(pdf_hash, item_id)
+                DO UPDATE SET audited = excluded.audited
+                """,
+                [(pdf_hash, item_id, int(audited)) for item_id, audited in states],
+            )
+
     def clear_audit_state(self, pdf_hash: str) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM audit_state WHERE pdf_hash = ?", (pdf_hash,))
@@ -214,7 +255,7 @@ class AuditDatabase:
                 location=normalize_location(location),
                 carrier=normalize_carrier(carrier),
                 tracking=normalize_tracking(tracking),
-                last4=normalize_last4(last4),
+                last4=resolve_last4(last4, tracking),
                 note=note.strip(),
             )
             for unit, location, carrier, tracking, last4, note in rows
@@ -280,11 +321,25 @@ class AuditDatabase:
             )
         return True
 
-    def delete_package_error_by_tracking(self, pdf_hash: str, tracking: str) -> None:
+    def delete_package_error(self, pdf_hash: str, row: PackageError) -> None:
+        """Delete one exact automatic row without touching similar manual rows."""
+        tracking = normalize_tracking(row.tracking)
         with self.conn:
             self.conn.execute(
-                "DELETE FROM package_errors WHERE pdf_hash = ? AND tracking = ?",
-                (pdf_hash, normalize_tracking(tracking)),
+                """
+                DELETE FROM package_errors
+                WHERE pdf_hash = ? AND unit = ? AND location = ? AND carrier = ?
+                  AND tracking = ? AND last4 = ? AND note = ?
+                """,
+                (
+                    pdf_hash,
+                    normalize_unit(row.unit),
+                    normalize_location(row.location),
+                    normalize_carrier(row.carrier),
+                    tracking,
+                    self._last4(row.last4, tracking),
+                    row.note.strip(),
+                ),
             )
 
     def load_double_logged(self, pdf_hash: str) -> list[DoubleLoggedPackage]:
@@ -304,7 +359,7 @@ class AuditDatabase:
                 location=normalize_location(location),
                 carrier=normalize_carrier(carrier),
                 tracking=normalize_tracking(tracking),
-                last4=normalize_last4(last4),
+                last4=resolve_last4(last4, tracking),
             )
             for unit, location, carrier, tracking, last4 in rows
         ]
@@ -338,9 +393,12 @@ class AuditDatabase:
             """
             SELECT 1 FROM double_logged
             WHERE pdf_hash = ? AND unit = ?
-              AND ((? <> '' AND tracking = ?) OR last4 = ?)
+              AND (
+                  (? <> '' AND tracking <> '' AND tracking = ?)
+                  OR ((? = '' OR tracking = '') AND last4 = ?)
+              )
             """,
-            (pdf_hash, unit, tracking, tracking, last4),
+            (pdf_hash, unit, tracking, tracking, tracking, last4),
         ).fetchone()
         if existing:
             return False
@@ -361,14 +419,24 @@ class AuditDatabase:
             )
         return True
 
-    def delete_double_logged_by_tracking(self, pdf_hash: str, unit: str, tracking: str) -> None:
+    def delete_double_logged(self, pdf_hash: str, row: DoubleLoggedPackage) -> None:
+        """Delete one exact automatic duplicate without removing nearby manual data."""
+        tracking = normalize_tracking(row.tracking)
         with self.conn:
             self.conn.execute(
                 """
                 DELETE FROM double_logged
-                WHERE pdf_hash = ? AND unit = ? AND tracking = ?
+                WHERE pdf_hash = ? AND unit = ? AND location = ? AND carrier = ?
+                  AND tracking = ? AND last4 = ?
                 """,
-                (pdf_hash, normalize_unit(unit), normalize_tracking(tracking)),
+                (
+                    pdf_hash,
+                    normalize_unit(row.unit),
+                    normalize_location(row.location),
+                    normalize_carrier(row.carrier),
+                    tracking,
+                    self._last4(row.last4, tracking),
+                ),
             )
 
     def upsert_scanner_alert(self, pdf_hash: str, alert: ScannerAlert) -> None:
@@ -407,16 +475,26 @@ class AuditDatabase:
             )
 
     def load_scanner_alerts(self, pdf_hash: str, *, include_resolved: bool = True) -> list[ScannerAlert]:
-        where = "pdf_hash = ?" if include_resolved else "pdf_hash = ? AND resolved = 0"
-        rows = self.conn.execute(
-            f"""
-            SELECT alert_key, kind, severity, unit, carrier, tracking, last4,
-                   message, item_ids, resolved, created_at
-            FROM scanner_alerts WHERE {where}
-            ORDER BY resolved, created_at DESC, id DESC
-            """,
-            (pdf_hash,),
-        ).fetchall()
+        if include_resolved:
+            rows = self.conn.execute(
+                """
+                SELECT alert_key, kind, severity, unit, carrier, tracking, last4,
+                       message, item_ids, resolved, created_at
+                FROM scanner_alerts WHERE pdf_hash = ?
+                ORDER BY resolved, created_at DESC, id DESC
+                """,
+                (pdf_hash,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT alert_key, kind, severity, unit, carrier, tracking, last4,
+                       message, item_ids, resolved, created_at
+                FROM scanner_alerts WHERE pdf_hash = ? AND resolved = 0
+                ORDER BY created_at DESC, id DESC
+                """,
+                (pdf_hash,),
+            ).fetchall()
         return [
             ScannerAlert(
                 alert_key=alert_key,
@@ -427,7 +505,7 @@ class AuditDatabase:
                 tracking=tracking,
                 last4=last4,
                 message=message,
-                item_ids=tuple(json.loads(item_ids)),
+                item_ids=self._json_string_list(item_ids),
                 resolved=bool(resolved),
                 created_at=created_at,
             )
@@ -516,7 +594,7 @@ class AuditDatabase:
                 last4=last4,
                 item_id=item_id,
                 message=message,
-                details=json.loads(details),
+                details=self._json_object(details),
                 created_at=created_at,
             )
             for (
@@ -533,6 +611,20 @@ class AuditDatabase:
                 created_at,
             ) in rows
         ]
+
+    def scanner_units_for_tracking(self, pdf_hash: str, tracking: str) -> set[str]:
+        """Return every non-blank unit previously recorded for a tracking value."""
+        normalized = normalize_tracking(tracking)
+        if not normalized:
+            return set()
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT unit FROM scanner_events
+            WHERE pdf_hash = ? AND tracking = ? AND unit <> ''
+            """,
+            (pdf_hash, normalized),
+        ).fetchall()
+        return {normalize_unit(row[0]) for row in rows}
 
     def record_scanner_feedback(
         self,
@@ -568,7 +660,7 @@ class AuditDatabase:
 
     def load_scanner_model(self) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT model_json FROM scanner_model WHERE model_key = 'default'").fetchone()
-        return json.loads(row[0]) if row else None
+        return self._json_object(row[0]) if row else None
 
     def save_scanner_model(self, model: dict[str, Any]) -> None:
         with self.conn:

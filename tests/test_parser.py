@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-import fitz
+import pymupdf as fitz
 
 from app.parser import _parse_page, _split_resident_and_package, clean_lines, parse_buildinglink_pdf
 

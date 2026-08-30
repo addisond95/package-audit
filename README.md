@@ -41,6 +41,8 @@ transcription work by capturing audit observations directly as structured data.
 **Phone scanner (local and free)**
 - Pair a phone browser over the same Wi‑Fi using a temporary six-digit code or QR code
 - Scan QR codes, 1D/2D barcodes, or photograph a printed package label
+- See live audited/remaining totals, alert counts, and desktop connection state on the phone
+- Take a new photo or choose an existing one; large camera photos are resized on the phone before upload
 - Decode barcodes locally with ZXing and printed text locally with Tesseract OCR
 - Match only tracking number, unit, and any listed resident surname; carrier is never a match signal
 - Automatically mark confident matches, ask "Do you mean?" for uncertain matches, and log reliable
@@ -49,14 +51,13 @@ transcription work by capturing audit observations directly as structured data.
 - Learn confidence weights and recurring OCR corrections from confirmations and rejections
 
 **Manual report sections**
-- *Package Errors* — `Unit | Location | Carrier | Last 4 | Note`
-- *Double Logged Packages* — `Unit | Location | Carrier | Last 4`
-- Spreadsheet‑style editing with dropdowns, tab navigation, auto blank rows, and
-  bulk paste import
+- *Package Errors* — `Unit | Location | Carrier | Tracking | Last 4 | Note`
+- *Double Logged Packages* — `Unit | Location | Carrier | Tracking | Last 4`
+- Spreadsheet‑style editing with dropdowns, tab navigation, and automatic blank rows
 
 **Exports**
 - Audit report (`.txt`)
-- Raw data (`.csv`)
+- Spreadsheet-safe raw data (`.csv`)
 - Highlighted copy of the source PDF
 
 ---
@@ -81,12 +82,18 @@ package-audit/
 │   ├── models.py           # Dataclasses + value normalization
 │   ├── parser.py           # BuildingLink PDF parsing
 │   ├── database.py         # SQLite persistence layer
+│   ├── diagnostics.py      # Private rotating crash diagnostics
 │   ├── audit_report.py     # Plain-text report generation
 │   ├── export_pdf.py       # Highlighted PDF export
+│   ├── export_utils.py     # Safe CSV cells + atomic private exports
 │   ├── delegates.py        # Table cell editors (dropdowns)
+│   ├── scanner_matching.py # Tracking/unit/surname confidence matching
+│   ├── scanner_server.py   # Paired local-network phone web app
+│   ├── scanner_vision.py   # Local barcode decoding and OCR
+│   ├── scanner_ui.py       # Desktop pairing dialog
 │   ├── theme.py            # Qt stylesheet
 │   └── main_window.py      # Main window and application wiring
-├── tests/                  # Pytest suite (models, reporting, database)
+├── tests/                  # Regression and smoke-test suite
 ├── data/                   # Put source PDFs here (local)
 └── exports/                # Generated reports (local)
 ```
@@ -106,20 +113,33 @@ brew install tesseract
 
 # Launch the application
 uv run python main.py
+
+# Or use the installed console entry point
+uv run package-audit
 ```
+
+On Windows, barcode scanning works in the packaged app without extra setup. For
+printed-text OCR, install Tesseract OCR in its standard `Program Files` location
+or make `tesseract.exe` available on `PATH`.
 
 ### Development
 
 ```bash
 uv run pytest        # run the test suite
 uv run ruff check .  # lint
+uv run ruff format --check .
+uv run bandit -q -r app main.py
+uv run pip-audit
+uv run python main.py --export-smoke
+uv run python main.py --scanner-smoke
+uv run python main.py --ui-smoke
 ```
 
 ### Build a standalone macOS app
 
 ```bash
 uv run pyinstaller package-audit.spec --clean -y
-# Output: dist/Package Audit.app  (~146 MB, double-clickable, no Python required)
+# Output: dist/Package Audit.app (double-clickable, no Python required)
 ```
 
 ---
@@ -147,9 +167,12 @@ flowchart LR
 1. Open an audit PDF on the desktop.
 2. Click **Start Phone Scanner**.
 3. Scan the displayed QR code with a phone on the same Wi‑Fi, or enter the shown URL and pairing code.
-4. Tap **Scan package** and photograph the label. The image is processed in memory and is not saved.
+   The desktop dialog confirms when the phone is connected and can copy the address when manual entry is easier.
+4. Tap **Take package photo** or **Choose photo**. The image is resized on the phone when useful, processed
+   in memory on the desktop, and is not saved.
 5. High-confidence matches are marked in the desktop audit. Medium-confidence results ask for a choice.
-  Reliable barcodes absent from the audit are logged in Package Errors as `Not logged`.
+   Reliable barcodes absent from the audit are logged in Package Errors as `Not logged`. The phone only offers
+   a manual `Not logged` action when it actually read a reliable tracking number or an unambiguous labeled unit.
 6. Duplicate tracking produces a Double Logged row and an orange alert. Red means not logged, yellow means
   review, and the ordinary audit highlight remains green.
 
@@ -157,6 +180,18 @@ The phone scanner binds to the local network only, requires a temporary pairing 
 session plus CSRF checks, and does not require internet access or a paid service. Keep the phone and computer
 on a trusted private Wi‑Fi network. If OCR is unavailable, barcode and QR scanning still work and the pairing
 screen reports the missing OCR capability.
+
+If the phone reports that the desktop is unavailable, keep the desktop scanner running and confirm both devices
+are on the same non-guest Wi‑Fi; VPNs and access-point client isolation can prevent local-device connections.
+The phone disables new scans while disconnected and offers a direct retry or re-pair action instead of silently
+continuing with stale state.
+
+Audit state and newly exported files are created with private user-only permissions on platforms that support
+POSIX permission bits. The `data/` and `exports/` directory contents are ignored by Git because PDFs, reports,
+and CSV files may contain resident information. SQLite state remains local and is not encrypted at rest; use
+the operating system's disk encryption and account protections on production workstations. A small rotating
+diagnostic log is stored at `~/.package_audit/package-audit.log` with user-only permissions where supported;
+it records failures and file paths, but the application does not intentionally log parsed resident data.
 
 The pairing code expires after 15 minutes; an already paired phone remains connected until the scanner stops
 or a different PDF is loaded. macOS may ask whether Python can accept incoming network connections the first
@@ -231,7 +266,7 @@ restores checked rows and manual entries automatically.
 
 ---
 
-## Roadmap
+## Release status
 
 **v0.5 (current)** — local phone QR/barcode/OCR scanner, confidence review,
 automatic Not logged and duplicate records, alerts, undo, and adaptive matching,
@@ -240,5 +275,7 @@ while preserving the complete manual workflow and exports.
 **v0.4** — complete manual audit workflow: parsing, verification, search/filter,
 bulk actions, manual report sections, persistence, and exports.
 
-**v1.0 (planned)** — additional real-label validation, threshold tuning from
-feedback history, UI polish, and packaging for non-technical users.
+The remaining distribution work is platform trust and release infrastructure:
+Developer ID signing/notarization for macOS and native Windows artifact validation
+through the included GitHub Actions workflow. Neither requires changing the audit
+or scanner data model.

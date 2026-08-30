@@ -11,7 +11,7 @@ import hashlib
 import re
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 from app.models import AuditEntry
 
@@ -129,7 +129,8 @@ def _parse_page(lines: list[str], page_index: int, entries: list[AuditEntry]) ->
             duplicate_index = labeled_occurrences.get(occurrence_key, 0)
             labeled_occurrences[occurrence_key] = duplicate_index + 1
             raw_id = f"labeled|{page_index}|{duplicate_index}|{unit}|{resident}|{package}|{timestamp}"
-        item_id = hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:16]
+        # This is a compact stable identifier, not a security digest.
+        item_id = hashlib.sha1(raw_id.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
         entries.append(
             AuditEntry(

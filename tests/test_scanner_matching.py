@@ -74,6 +74,10 @@ def test_tracking_can_be_extracted_from_qr_url_and_unicode_is_discarded():
     assert normalize_code("１Z-99é") == "Z99"
 
 
+def test_tracking_split_by_ocr_whitespace_is_rejoined():
+    assert extract_tracking_values("1Z999AA 10123456784") == ("1Z999AA10123456784",)
+
+
 def test_unique_exact_barcode_is_automatic_match():
     entries = [_entry("one", "1701S", "Mathiesen", "1Z999AA10123456784")]
     observation = ScanObservation(barcodes=("1Z999AA10123456784",), barcode_formats=("Code 128",))
@@ -98,6 +102,20 @@ def test_exact_barcode_wins_when_same_unit_and_resident_have_multiple_packages()
 
     assert decision.status == "matched"
     assert decision.related_item_ids == ("one",)
+
+
+def test_distinct_known_barcodes_require_review_instead_of_arbitrary_auto_match():
+    entries = [
+        _entry("one", "1701S", "Mathiesen", "1Z999AA10123456784"),
+        _entry("two", "1802S", "Nguyen", "1Z999AA10123450000"),
+    ]
+
+    decision = PackageMatcher(entries).decide(
+        ScanObservation(barcodes=("1Z999AA10123456784", "1Z999AA10123450000"))
+    )
+
+    assert decision.status == "review"
+    assert {candidate.item_id for candidate in decision.candidates} == {"one", "two"}
 
 
 def test_exact_tracking_with_conflicting_unit_requires_duplicate_investigation():
@@ -179,6 +197,18 @@ def test_unit_and_surname_without_tracking_requires_review():
     assert decision.candidates[0].item_id == "one"
 
 
+def test_low_confidence_ocr_cannot_automatically_match_without_a_barcode():
+    entries = [_entry("one", "1701S", "Mathiesen", "1Z999AA10123456784")]
+    observation = ScanObservation(
+        ocr_text="MATHIESEN UNIT 1701S TRACKING 1Z999AA10123456784",
+        ocr_confidence=15.0,
+    )
+
+    decision = PackageMatcher(entries).decide(observation)
+
+    assert decision.status == "review"
+
+
 def test_extreme_learned_weights_cannot_auto_match_without_tracking():
     entries = [_entry("one", "1701S", "Mathiesen", "1Z999AA10123456784")]
     model = AdaptiveMatchModel()
@@ -218,6 +248,18 @@ def test_reliable_unmatched_barcode_is_logged_as_not_found():
     assert decision.status == "not_found"
     assert decision.tracking == "1Z999AA10123450000"
     assert decision.carrier == "UPS"
+
+
+def test_unmatched_retail_product_barcode_is_not_auto_logged():
+    entries = [_entry("one", "1701S", "Mathiesen", "1Z999AA10123456784")]
+    observation = ScanObservation(
+        barcodes=("012345678905",),
+        barcode_formats=("UPC-A",),
+    )
+
+    decision = PackageMatcher(entries).decide(observation)
+
+    assert decision.status == "poor_scan"
 
 
 def test_unmatched_barcode_is_not_overridden_by_matching_unit_and_name():
@@ -279,6 +321,25 @@ def test_model_learns_repeated_ocr_name_and_unit_corrections():
     assert after.features["learned_surname_alias"] == 1.0
     restored = AdaptiveMatchModel.from_dict(model.to_dict())
     assert restored.to_dict() == model.to_dict()
+
+
+def test_malformed_adaptive_model_values_fall_back_safely():
+    restored = AdaptiveMatchModel.from_dict(
+        {
+            "bias": "not-a-number",
+            "weights": {"unit_exact": "bad", "tracking_exact": 6},
+            "examples": "bad",
+            "unit_aliases": [],
+            "surname_aliases": {"MATHIESCN": {"MATHIESEN": 2, "BAD": "many"}},
+        }
+    )
+
+    assert restored.bias == -4.0
+    assert restored.weights["unit_exact"] == 3.0
+    assert restored.weights["tracking_exact"] == 6.0
+    assert restored.examples == 0
+    assert restored.unit_aliases == {}
+    assert restored.surname_aliases == {"MATHIESCN": {"MATHIESEN": 2}}
 
 
 def test_rejection_lowers_suggested_candidate_probability():

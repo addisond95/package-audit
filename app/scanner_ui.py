@@ -7,9 +7,10 @@ import webbrowser
 from collections.abc import Callable
 
 import qrcode
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -65,10 +66,15 @@ class ScannerPairingDialog(QDialog):
         code.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(code)
 
-        expiry = QLabel("Pairing code expires in 15 minutes. Paired phones stay connected.")
-        expiry.setAlignment(Qt.AlignCenter)
-        expiry.setObjectName("scannerStatus")
-        layout.addWidget(expiry)
+        self.connection_status = QLabel()
+        self.connection_status.setAlignment(Qt.AlignCenter)
+        self.connection_status.setObjectName("scannerStatus")
+        layout.addWidget(self.connection_status)
+
+        self.expiry_status = QLabel()
+        self.expiry_status.setAlignment(Qt.AlignCenter)
+        self.expiry_status.setObjectName("scannerStatus")
+        layout.addWidget(self.expiry_status)
 
         url = QLabel(server.url)
         url.setAlignment(Qt.AlignCenter)
@@ -79,16 +85,27 @@ class ScannerPairingDialog(QDialog):
         buttons = QHBoxLayout()
         open_button = QPushButton("Open on This Mac")
         open_button.clicked.connect(lambda: webbrowser.open(server.url))
+        self.copy_button = QPushButton("Copy Address")
+        self.copy_button.clicked.connect(self._copy_address)
         close_button = QPushButton("Hide")
         close_button.clicked.connect(self.hide)
         stop_button = QPushButton("Stop Scanner")
         stop_button.setProperty("variant", "danger")
         stop_button.clicked.connect(self._stop)
         buttons.addWidget(open_button)
+        buttons.addWidget(self.copy_button)
         buttons.addStretch(1)
         buttons.addWidget(close_button)
         buttons.addWidget(stop_button)
         layout.addLayout(buttons)
+
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._refresh_status)
+        self.status_timer.start(1000)
+        self.copy_reset_timer = QTimer(self)
+        self.copy_reset_timer.setSingleShot(True)
+        self.copy_reset_timer.timeout.connect(lambda: self.copy_button.setText("Copy Address"))
+        self._refresh_status()
 
     @staticmethod
     def _qr_pixmap(value: str) -> QPixmap:
@@ -102,3 +119,27 @@ class ScannerPairingDialog(QDialog):
     def _stop(self) -> None:
         self.hide()
         self.stop_callback()
+
+    def _copy_address(self) -> None:
+        QApplication.clipboard().setText(self.server.url)
+        self.copy_button.setText("Copied")
+        self.copy_reset_timer.start(1500)
+
+    def _refresh_status(self) -> None:
+        phone_count = self.server.coordinator.active_phone_count()
+        if phone_count:
+            noun = "phone" if phone_count == 1 else "phones"
+            self.connection_status.setText(f"● {phone_count} {noun} connected")
+        else:
+            self.connection_status.setText("Waiting for a phone to connect…")
+
+        seconds = self.server.pairing_seconds_remaining
+        if seconds:
+            minutes = max(1, (seconds + 59) // 60)
+            self.expiry_status.setText(
+                f"New phones can pair for {minutes} more min. Connected phones stay paired."
+            )
+        else:
+            self.expiry_status.setText(
+                "Pairing code expired. Stop and restart the scanner to connect another phone."
+            )

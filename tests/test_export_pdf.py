@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import fitz
+import pymupdf as fitz
 import pytest
 from PySide6.QtGui import QColor
 
@@ -37,7 +37,7 @@ def test_only_audited_duplicate_unit_row_is_highlighted(tmp_path):
         _entry("one", "UPS - #1 - TRACK1111", audited=False),
         _entry("two", "UPS - #2 - TRACK2222", audited=True),
     ]
-    write_highlighted_pdf(source, output, entries, QColor(80, 200, 120, 95))
+    result = write_highlighted_pdf(source, output, entries, QColor(80, 200, 120, 95))
 
     with fitz.open(output) as document:
         page = document[0]
@@ -45,6 +45,8 @@ def test_only_audited_duplicate_unit_row_is_highlighted(tmp_path):
         annotation_rects = [fitz.Rect(annotation.rect) for annotation in page.annots() or []]
 
     assert len(annotation_rects) == 1
+    assert result.highlighted_item_ids == ("two",)
+    assert result.unresolved_item_ids == ()
     annotation_y = annotation_rects[0].y0
     assert abs(annotation_y - unit_matches[1].y0) < abs(annotation_y - unit_matches[0].y0)
 
@@ -129,6 +131,19 @@ def test_no_audited_entries_produces_unannotated_copy(tmp_path):
         assert list(document[0].annots() or []) == []
 
 
+def test_highlight_export_refuses_to_replace_source_pdf(tmp_path):
+    source = tmp_path / "source.pdf"
+    with fitz.open() as document:
+        document.new_page()
+        document.save(source)
+    original = source.read_bytes()
+
+    with pytest.raises(ValueError, match="different from the source"):
+        write_highlighted_pdf(source, source, [], QColor(80, 200, 120, 95))
+
+    assert source.read_bytes() == original
+
+
 def test_all_duplicate_unit_entries_receive_separate_highlights(tmp_path):
     source = tmp_path / "source.pdf"
     output = tmp_path / "highlighted.pdf"
@@ -155,28 +170,29 @@ def test_all_duplicate_unit_entries_receive_separate_highlights(tmp_path):
         assert annotations[0].opacity == pytest.approx(0.65)
         assert annotations[0].colors["fill"] == pytest.approx([10 / 255, 20 / 255, 30 / 255], abs=0.01)
 
-    def test_scanner_entry_color_overrides_audited_highlight(tmp_path):
-        source = tmp_path / "source.pdf"
-        output = tmp_path / "highlighted.pdf"
-        entry = _entry("one", "UPS - #1 - TRACK1111", audited=True)
 
-        with fitz.open() as document:
-            page = document.new_page()
-            page.insert_text((50, 100), "1701S Resident one UPS - #1 - TRACK1111")
-            document.save(source)
+def test_scanner_entry_color_overrides_audited_highlight(tmp_path):
+    source = tmp_path / "source.pdf"
+    output = tmp_path / "highlighted.pdf"
+    entry = _entry("one", "UPS - #1 - TRACK1111", audited=True)
 
-        warning = QColor(245, 166, 35, 95)
-        write_highlighted_pdf(
-            source,
-            output,
-            [entry],
-            QColor(80, 200, 120, 95),
-            {entry.item_id: warning},
-        )
+    with fitz.open() as document:
+        page = document.new_page()
+        page.insert_text((50, 100), "1701S Resident one UPS - #1 - TRACK1111")
+        document.save(source)
 
-        with fitz.open(output) as document:
-            annotation = next(document[0].annots())
-            assert annotation.colors["fill"] == pytest.approx([245 / 255, 166 / 255, 35 / 255], abs=0.01)
+    warning = QColor(245, 166, 35, 95)
+    write_highlighted_pdf(
+        source,
+        output,
+        [entry],
+        QColor(80, 200, 120, 95),
+        {entry.item_id: warning},
+    )
+
+    with fitz.open(output) as document:
+        annotation = next(document[0].annots())
+        assert annotation.colors["fill"] == pytest.approx([245 / 255, 166 / 255, 35 / 255], abs=0.01)
 
 
 def test_stale_page_index_is_ignored(tmp_path):
@@ -190,11 +206,13 @@ def test_stale_page_index_is_ignored(tmp_path):
     stale_entry = _entry("stale", "UPS - #1 - TRACK1111", audited=True)
     stale_entry.page_index = 99
 
-    write_highlighted_pdf(source, output, [stale_entry], QColor(80, 200, 120, 95))
+    result = write_highlighted_pdf(source, output, [stale_entry], QColor(80, 200, 120, 95))
 
     with fitz.open(output) as document:
         assert len(document) == 1
         assert list(document[0].annots() or []) == []
+    assert result.highlighted_count == 0
+    assert result.unresolved_item_ids == ("stale",)
 
 
 def test_numeric_unit_does_not_match_tracking_substring(tmp_path):

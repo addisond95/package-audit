@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 
 import pytest
@@ -29,6 +30,13 @@ def test_audit_state_update_overwrites(db):
     db.set_state("hash-a", "item-1", True)
     db.set_state("hash-a", "item-1", False)
     assert db.load_state("hash-a") == {"item-1": False}
+
+
+def test_audit_state_batch_update_is_atomic(db):
+    db.set_states("hash-a", [("item-1", True), ("item-2", False)])
+    db.set_states("hash-a", [("item-2", True)])
+
+    assert db.load_state("hash-a") == {"item-1": True, "item-2": True}
 
 
 def test_state_is_isolated_per_pdf_hash(db):
@@ -159,6 +167,18 @@ def test_double_log_dedupes_full_tracking_against_last_four_only(db):
     assert len(db.load_double_logged("hash-a")) == 1
 
 
+def test_double_log_keeps_distinct_full_trackings_with_same_last_four(db):
+    first = DoubleLoggedPackage("1701S", "", "UPS", "6784", "1Z999AA10123456784")
+    second = DoubleLoggedPackage("1701S", "", "UPS", "6784", "940000000000006784")
+
+    assert db.add_double_logged_if_missing("hash-a", first) is True
+    assert db.add_double_logged_if_missing("hash-a", second) is True
+    assert {row.tracking for row in db.load_double_logged("hash-a")} == {
+        "1Z999AA10123456784",
+        "940000000000006784",
+    }
+
+
 def test_scanner_alert_upsert_resolution_and_clear(db):
     alert = ScannerAlert(
         alert_key="duplicate:TRACK1234",
@@ -210,3 +230,61 @@ def test_scanner_event_feedback_and_model_round_trip(db):
     model = {"bias": -3.5, "weights": {"unit": 2.0}, "examples": 1}
     db.save_scanner_model(model)
     assert db.load_scanner_model() == model
+
+
+def test_scanner_units_query_is_not_limited_to_recent_events(db):
+    tracking = "1Z000ZZ00000000001"
+    for index in range(105):
+        db.save_scanner_event(
+            "hash-a",
+            ScannerEvent(
+                scan_id=f"scan-{index:03d}",
+                status="not_found",
+                confidence=0.95,
+                unit="9901S" if index == 0 else "",
+                tracking=tracking if index == 0 else f"TRACKING{index:010d}",
+            ),
+        )
+
+    assert db.scanner_units_for_tracking("hash-a", tracking) == {"9901S"}
+
+
+def test_malformed_scanner_json_falls_back_safely(db):
+    with db.conn:
+        db.conn.execute(
+            """
+            INSERT INTO scanner_alerts (
+                pdf_hash, alert_key, kind, severity, unit, carrier, tracking,
+                last4, message, item_ids, resolved, created_at
+            ) VALUES ('hash-a', 'bad', 'review', 'review', '', 'PKG', '',
+                      'NaN', 'bad json', '{', 0, '2026-01-01T00:00:00+00:00')
+            """
+        )
+        db.conn.execute(
+            """
+            INSERT INTO scanner_events (
+                pdf_hash, scan_id, status, confidence, unit, carrier, tracking,
+                last4, item_id, message, details, created_at
+            ) VALUES ('hash-a', 'bad', 'review', 0.5, '', 'PKG', '',
+                      'NaN', '', 'bad json', '[', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        db.conn.execute(
+            """
+            INSERT INTO scanner_model (model_key, model_json, updated_at)
+            VALUES ('default', '[]', '2026-01-01T00:00:00+00:00')
+            """
+        )
+
+    assert db.load_scanner_alerts("hash-a")[0].item_ids == ()
+    assert db.load_scanner_events("hash-a")[0].details == {}
+    assert db.load_scanner_model() == {}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not enforced on Windows")
+def test_database_file_is_private(tmp_path):
+    database = AuditDatabase(tmp_path / "private" / "audit.sqlite3")
+    try:
+        assert database.db_path.stat().st_mode & 0o777 == 0o600
+    finally:
+        database.close()

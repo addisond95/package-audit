@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import csv
+import logging
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -39,10 +41,13 @@ from app.constants import (
     DB_FILENAME,
     DEFAULT_HIGHLIGHT_RGBA,
     LOCATION_OPTIONS,
+    MISSING_LAST4,
 )
 from app.database import AuditDatabase
 from app.delegates import ComboBoxDelegate
+from app.diagnostics import LOGGER_NAME, configure_diagnostics, install_exception_hooks
 from app.export_pdf import write_highlighted_pdf
+from app.export_utils import atomic_output_path, spreadsheet_safe_cell
 from app.models import (
     AuditEntry,
     DoubleLoggedPackage,
@@ -54,6 +59,7 @@ from app.models import (
     normalize_location,
     normalize_tracking,
     normalize_unit,
+    resolve_last4,
 )
 from app.parser import file_hash, parse_buildinglink_pdf
 from app.scanner_server import ScannerAction, ScannerCoordinator, ScannerServer
@@ -79,6 +85,7 @@ ALERT_COLORS = {
     "warning": QColor(245, 166, 35, 95),
     "review": QColor(242, 201, 76, 95),
 }
+LOGGER = logging.getLogger(LOGGER_NAME)
 
 
 class PackageAuditApp(QMainWindow):
@@ -90,7 +97,12 @@ class PackageAuditApp(QMainWindow):
         self.resize(1500, 900)
         self.setMinimumSize(1100, 640)
 
-        APP_DIR.mkdir(exist_ok=True)
+        APP_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            APP_DIR.chmod(0o700)
+        except OSError:
+            # Permission bits are not consistently supported on Windows.
+            pass
         self.db = AuditDatabase(APP_DIR / DB_FILENAME)
 
         self.pdf_path: Path | None = None
@@ -415,8 +427,10 @@ class PackageAuditApp(QMainWindow):
         path = Path(path_str)
         try:
             entries = parse_buildinglink_pdf(path)
+            pdf_digest = file_hash(path)
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
-            QMessageBox.critical(self, "Parse failed", f"Could not parse PDF:\n{exc}")
+            LOGGER.exception("Could not read or parse PDF %s", path)
+            QMessageBox.critical(self, "Open failed", f"Could not read or parse PDF:\n{exc}")
             return
 
         if not entries:
@@ -428,7 +442,7 @@ class PackageAuditApp(QMainWindow):
             return
 
         self.pdf_path = path
-        self.pdf_hash = file_hash(path)
+        self.pdf_hash = pdf_digest
         self.entries = entries
 
         saved = self.db.load_state(self.pdf_hash)
@@ -511,6 +525,14 @@ class PackageAuditApp(QMainWindow):
             f'<span style="color:#69727f;">{label}</span>'
         )
 
+    @staticmethod
+    def _local_timestamp(value: str) -> str:
+        """Render stored ISO timestamps in the desktop's local timezone."""
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return value.replace("T", " ")[:19]
+
     def on_audit_cell_clicked(self, row: int, _column: int) -> None:
         # Read the entry index from the row itself so toggling is correct even
         # when the table has been re-sorted by the user.
@@ -539,14 +561,14 @@ class PackageAuditApp(QMainWindow):
     def _set_visible_audited(self, audited: bool) -> None:
         if not self.pdf_hash or not self.filtered_indices:
             return
-        changed = False
+        changed_states: list[tuple[str, bool]] = []
         for entry_index in self.filtered_indices:
             entry = self.entries[entry_index]
             if entry.audited != audited:
                 entry.audited = audited
-                self.db.set_state(self.pdf_hash, entry.item_id, audited)
-                changed = True
-        if changed:
+                changed_states.append((entry.item_id, audited))
+        if changed_states:
+            self.db.set_states(self.pdf_hash, changed_states)
             self.scanner_coordinator.configure(self.pdf_hash, self.entries)
             self._refresh_table()
 
@@ -612,20 +634,24 @@ class PackageAuditApp(QMainWindow):
         new_value = normalizer(value) if normalizer else value
         if new_value != value:
             self._with_table_loading(lambda: item.setText(new_value))
+        if item.column() == 3 and new_value:
+            last4_item = table.item(item.row(), 4)
+            if last4_item is None:
+                last4_item = QTableWidgetItem("")
+                self._with_table_loading(lambda: table.setItem(item.row(), 4, last4_item))
+            if not last4_item.text().strip() or last4_item.text().strip().casefold() == "nan":
+                derived = normalize_last4(new_value)
+                self._with_table_loading(lambda: last4_item.setText(derived))
 
     def delete_selected_errors(self) -> None:
         self._delete_selected_rows(self.errors_table)
+        self._with_table_loading(lambda: self._ensure_blank_last_row(self.errors_table, ERROR_COLUMNS))
         self.save_error_rows()
 
     def delete_selected_double_logged(self) -> None:
         self._delete_selected_rows(self.double_table)
+        self._with_table_loading(lambda: self._ensure_blank_last_row(self.double_table, DOUBLE_COLUMNS))
         self.save_double_rows()
-
-    def _remove_trailing_blank_rows(self, table: QTableWidget, column_count: int) -> None:
-        for row in range(table.rowCount() - 1, -1, -1):
-            if self._row_has_values(table, row, column_count):
-                break
-            table.removeRow(row)
 
     def _delete_selected_rows(self, table: QTableWidget) -> None:
         rows = sorted({index.row() for index in table.selectedIndexes()}, reverse=True)
@@ -644,33 +670,37 @@ class PackageAuditApp(QMainWindow):
         return collected
 
     def collect_error_rows(self) -> list[PackageError]:
-        return [
-            PackageError(
-                unit=normalize_unit(unit),
-                location=normalize_location(location),
-                carrier=normalize_carrier(carrier),
-                tracking=normalize_tracking(tracking),
-                last4=normalize_last4(last4),
-                note=note.strip(),
+        rows: list[PackageError] = []
+        for unit, location, carrier, tracking, last4, note in self._collect_rows(
+            self.errors_table, ERROR_COLUMNS
+        ):
+            normalized_tracking = normalize_tracking(tracking)
+            rows.append(
+                PackageError(
+                    unit=normalize_unit(unit),
+                    location=normalize_location(location),
+                    carrier=normalize_carrier(carrier),
+                    tracking=normalized_tracking,
+                    last4=resolve_last4(last4, normalized_tracking),
+                    note=note.strip(),
+                )
             )
-            for unit, location, carrier, tracking, last4, note in self._collect_rows(
-                self.errors_table, ERROR_COLUMNS
-            )
-        ]
+        return rows
 
     def collect_double_rows(self) -> list[DoubleLoggedPackage]:
-        return [
-            DoubleLoggedPackage(
-                unit=normalize_unit(unit),
-                location=normalize_location(location),
-                carrier=normalize_carrier(carrier),
-                tracking=normalize_tracking(tracking),
-                last4=normalize_last4(last4),
+        rows: list[DoubleLoggedPackage] = []
+        for unit, location, carrier, tracking, last4 in self._collect_rows(self.double_table, DOUBLE_COLUMNS):
+            normalized_tracking = normalize_tracking(tracking)
+            rows.append(
+                DoubleLoggedPackage(
+                    unit=normalize_unit(unit),
+                    location=normalize_location(location),
+                    carrier=normalize_carrier(carrier),
+                    tracking=normalized_tracking,
+                    last4=resolve_last4(last4, normalized_tracking),
+                )
             )
-            for unit, location, carrier, tracking, last4 in self._collect_rows(
-                self.double_table, DOUBLE_COLUMNS
-            )
-        ]
+        return rows
 
     def save_error_rows(self) -> None:
         if self.pdf_hash:
@@ -736,6 +766,7 @@ class PackageAuditApp(QMainWindow):
         try:
             self.scanner_server.start()
         except OSError as exc:
+            LOGGER.exception("Could not start the local scanner server")
             QMessageBox.critical(self, "Scanner failed", f"Could not start the local scanner:\n{exc}")
             return
 
@@ -829,7 +860,7 @@ class PackageAuditApp(QMainWindow):
             {
                 "audited": {},
                 "alerts": [],
-                "package_tracking": "",
+                "package_error": None,
                 "double_rows": [],
             },
         )
@@ -899,17 +930,15 @@ class PackageAuditApp(QMainWindow):
             tracking = normalize_tracking(action.decision.tracking)
             alert_key = f"not_found:{tracking or action.scan_id}"
             existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
-            inserted = self.db.add_package_error_if_missing(
-                self.pdf_hash,
-                PackageError(
-                    unit=action.decision.unit,
-                    location="",
-                    carrier=action.decision.carrier,
-                    last4=tracking[-4:] if tracking else "",
-                    note="Not logged",
-                    tracking=tracking,
-                ),
+            package_error = PackageError(
+                unit=action.decision.unit,
+                location="",
+                carrier=action.decision.carrier,
+                last4=tracking[-4:] if tracking else "",
+                note="Not logged",
+                tracking=tracking,
             )
+            inserted = self.db.add_package_error_if_missing(self.pdf_hash, package_error)
             self.db.upsert_scanner_alert(
                 self.pdf_hash,
                 ScannerAlert(
@@ -924,30 +953,26 @@ class PackageAuditApp(QMainWindow):
                 ),
             )
             if inserted:
-                history["package_tracking"] = tracking
+                history["package_error"] = package_error
             if alert_key not in existing_keys:
                 history["alerts"].append(alert_key)
-            previous_units = {
-                event.unit
-                for event in self.db.load_scanner_events(self.pdf_hash)
-                if event.tracking == tracking and event.unit and event.unit != action.decision.unit
+            previous_units = self.db.scanner_units_for_tracking(self.pdf_hash, tracking) - {
+                action.decision.unit
             }
             if tracking and action.decision.unit and previous_units:
                 duplicate_key = f"duplicate_scan:{tracking}"
                 duplicate_units = previous_units | {action.decision.unit}
                 for unit in duplicate_units:
-                    inserted_double = self.db.add_double_logged_if_missing(
-                        self.pdf_hash,
-                        DoubleLoggedPackage(
-                            unit=unit,
-                            location="",
-                            carrier=action.decision.carrier,
-                            last4=tracking[-4:],
-                            tracking=tracking,
-                        ),
+                    duplicate_row = DoubleLoggedPackage(
+                        unit=unit,
+                        location="",
+                        carrier=action.decision.carrier,
+                        last4=tracking[-4:],
+                        tracking=tracking,
                     )
+                    inserted_double = self.db.add_double_logged_if_missing(self.pdf_hash, duplicate_row)
                     if inserted_double:
-                        history["double_rows"].append((unit, tracking))
+                        history["double_rows"].append(duplicate_row)
                 self.db.upsert_scanner_alert(
                     self.pdf_hash,
                     ScannerAlert(
@@ -974,31 +999,27 @@ class PackageAuditApp(QMainWindow):
             related = [entry for entry in self.entries if entry.item_id in action.decision.related_item_ids]
             related_units = {entry.unit for entry in related}
             for entry in related:
-                inserted = self.db.add_double_logged_if_missing(
-                    self.pdf_hash,
-                    DoubleLoggedPackage(
-                        unit=entry.unit,
-                        location="",
-                        carrier=self._entry_carrier(entry),
-                        last4=tracking[-4:] if tracking else entry.last4,
-                        tracking=tracking,
-                    ),
+                duplicate_row = DoubleLoggedPackage(
+                    unit=entry.unit,
+                    location="",
+                    carrier=self._entry_carrier(entry),
+                    last4=tracking[-4:] if tracking else entry.last4,
+                    tracking=tracking,
                 )
+                inserted = self.db.add_double_logged_if_missing(self.pdf_hash, duplicate_row)
                 if inserted:
-                    history["double_rows"].append((entry.unit, tracking))
+                    history["double_rows"].append(duplicate_row)
             if action.decision.unit and action.decision.unit not in related_units:
-                inserted = self.db.add_double_logged_if_missing(
-                    self.pdf_hash,
-                    DoubleLoggedPackage(
-                        unit=action.decision.unit,
-                        location="",
-                        carrier=action.decision.carrier,
-                        last4=tracking[-4:] if tracking else "",
-                        tracking=tracking,
-                    ),
+                duplicate_row = DoubleLoggedPackage(
+                    unit=action.decision.unit,
+                    location="",
+                    carrier=action.decision.carrier,
+                    last4=tracking[-4:] if tracking else "",
+                    tracking=tracking,
                 )
+                inserted = self.db.add_double_logged_if_missing(self.pdf_hash, duplicate_row)
                 if inserted:
-                    history["double_rows"].append((action.decision.unit, tracking))
+                    history["double_rows"].append(duplicate_row)
             self.db.upsert_scanner_alert(
                 self.pdf_hash,
                 ScannerAlert(
@@ -1070,10 +1091,10 @@ class PackageAuditApp(QMainWindow):
                 if entry:
                     entry.audited = previous
                     self.db.set_state(self.pdf_hash, item_id, previous)
-            if history["package_tracking"]:
-                self.db.delete_package_error_by_tracking(self.pdf_hash, history["package_tracking"])
-            for unit, tracking in history["double_rows"]:
-                self.db.delete_double_logged_by_tracking(self.pdf_hash, unit, tracking)
+            if history["package_error"] is not None:
+                self.db.delete_package_error(self.pdf_hash, history["package_error"])
+            for row in history["double_rows"]:
+                self.db.delete_double_logged(self.pdf_hash, row)
             for alert_key in history["alerts"]:
                 self.db.delete_scanner_alert(self.pdf_hash, alert_key)
         if save_event:
@@ -1106,7 +1127,7 @@ class PackageAuditApp(QMainWindow):
                 alert.tracking,
                 alert.last4,
                 alert.message,
-                alert.created_at.replace("T", " ")[:19],
+                self._local_timestamp(alert.created_at),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -1119,7 +1140,7 @@ class PackageAuditApp(QMainWindow):
                 summary[alert.kind] += 1
                 for item_id in alert.item_ids:
                     current = item_states.get(item_id)
-                    if current is None or priority[alert.severity] > priority[current]:
+                    if current is None or priority.get(alert.severity, 0) > priority.get(current, 0):
                         item_states[item_id] = alert.severity
         self.scanner_item_states = item_states
         self.open_alert_count = sum(summary.values())
@@ -1154,8 +1175,9 @@ class PackageAuditApp(QMainWindow):
             return
         if not self._confirm(
             "Clear current audit?",
-            "This will clear checked rows, package errors, and double logged rows for the "
-            "currently loaded PDF.\n\nIt will not delete the PDF. Continue?",
+            "This will clear checked rows, package errors, double logged rows, scanner alerts, "
+            "and scanner history for the currently loaded PDF.\n\n"
+            "It will not delete the PDF. Continue?",
         ):
             return
 
@@ -1199,7 +1221,7 @@ class PackageAuditApp(QMainWindow):
         path_str, _ = QFileDialog.getSaveFileName(
             self, "Export Audit TXT", default_name, "Text Files (*.txt)"
         )
-        if not path_str:
+        if not path_str or not self._validate_export_path(Path(path_str)):
             return
 
         try:
@@ -1211,6 +1233,7 @@ class PackageAuditApp(QMainWindow):
                 source_pdf_name=self.pdf_path.name if self.pdf_path else "",
             )
         except OSError as exc:
+            LOGGER.exception("Could not export audit report to %s", path_str)
             QMessageBox.critical(self, "Export failed", f"Could not write audit report:\n{exc}")
             return
         self._exported(path_str)
@@ -1221,29 +1244,40 @@ class PackageAuditApp(QMainWindow):
 
         default_name = f"{self.pdf_path.stem}_audit.csv" if self.pdf_path else "package_audit.csv"
         path_str, _ = QFileDialog.getSaveFileName(self, "Export Audit CSV", default_name, "CSV Files (*.csv)")
-        if not path_str:
+        if not path_str or not self._validate_export_path(Path(path_str)):
             return
 
         try:
-            with open(path_str, "w", newline="", encoding="utf-8") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(
-                    ["audited", "unit", "last4", "resident", "package", "tower", "timestamp", "page"]
-                )
-                for entry in self.entries:
+            with atomic_output_path(Path(path_str)) as temporary_path:
+                with temporary_path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
                     writer.writerow(
                         [
-                            "yes" if entry.audited else "no",
-                            entry.unit,
-                            entry.last4,
-                            entry.resident,
-                            entry.package,
-                            entry.tower,
-                            entry.timestamp,
-                            entry.page_index + 1,
+                            "audited",
+                            "unit",
+                            "last4",
+                            "resident",
+                            "package",
+                            "tower",
+                            "timestamp",
+                            "page",
                         ]
                     )
+                    for entry in self.entries:
+                        writer.writerow(
+                            [
+                                "yes" if entry.audited else "no",
+                                spreadsheet_safe_cell(entry.unit),
+                                spreadsheet_safe_cell(entry.last4),
+                                spreadsheet_safe_cell(entry.resident),
+                                spreadsheet_safe_cell(entry.package),
+                                spreadsheet_safe_cell(entry.tower),
+                                spreadsheet_safe_cell(entry.timestamp),
+                                entry.page_index + 1,
+                            ]
+                        )
         except (OSError, csv.Error) as exc:
+            LOGGER.exception("Could not export audit CSV to %s", path_str)
             QMessageBox.critical(self, "Export failed", f"Could not write audit CSV:\n{exc}")
             return
         self._exported(path_str)
@@ -1256,11 +1290,11 @@ class PackageAuditApp(QMainWindow):
         output_str, _ = QFileDialog.getSaveFileName(
             self, "Export Highlighted PDF", default_name, "PDF Files (*.pdf)"
         )
-        if not output_str:
+        if not output_str or not self._validate_export_path(Path(output_str)):
             return
 
         try:
-            write_highlighted_pdf(
+            result = write_highlighted_pdf(
                 input_pdf_path=self.pdf_path,
                 output_pdf_path=Path(output_str),
                 entries=self.entries,
@@ -1272,7 +1306,42 @@ class PackageAuditApp(QMainWindow):
                 },
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            LOGGER.exception("Could not export highlighted PDF to %s", output_str)
             QMessageBox.critical(self, "Export failed", f"Could not write highlighted PDF:\n{exc}")
+            return
+        if result.unresolved_count:
+            noun = "row" if result.unresolved_count == 1 else "rows"
+            entries_by_id = {entry.item_id: entry for entry in self.entries}
+            unresolved_details = []
+            for item_id in result.unresolved_item_ids[:8]:
+                entry = entries_by_id.get(item_id)
+                if entry is None:
+                    continue
+                tracking = (
+                    f"tracking ending {entry.last4}"
+                    if entry.last4 != MISSING_LAST4
+                    else "tracking unavailable"
+                )
+                unresolved_details.append(
+                    f"• Unit {entry.unit or 'unknown'}, {tracking}, source page {entry.page_index + 1}"
+                )
+            if result.unresolved_count > len(unresolved_details):
+                unresolved_details.append(
+                    f"• {result.unresolved_count - len(unresolved_details)} additional {noun}"
+                )
+            unresolved_summary = "\n".join(unresolved_details)
+            detail_text = f"\n\nRows to review:\n{unresolved_summary}" if unresolved_summary else ""
+            QMessageBox.warning(
+                self,
+                "Export completed with a warning",
+                f"Saved:\n{output_str}\n\n"
+                f"{result.unresolved_count} marked {noun} could not be located in the source PDF "
+                f"and was not highlighted. Review the exported file before using it.{detail_text}",
+            )
+            self.statusBar().showMessage(
+                f"Exported {Path(output_str).name} with {result.unresolved_count} unresolved {noun}",
+                8000,
+            )
             return
         self._exported(output_str)
 
@@ -1285,7 +1354,7 @@ class PackageAuditApp(QMainWindow):
 
     def _require_entries(self) -> bool:
         if not self.entries:
-            QMessageBox.information(self, "Nothing to export", "Open a PDF first.")
+            QMessageBox.information(self, "No audit loaded", "Open a PDF first.")
             return False
         return True
 
@@ -1293,12 +1362,25 @@ class PackageAuditApp(QMainWindow):
         answer = QMessageBox.question(self, title, message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return answer == QMessageBox.Yes
 
+    def _validate_export_path(self, output_path: Path) -> bool:
+        if self.pdf_path and output_path.resolve() == self.pdf_path.resolve():
+            QMessageBox.critical(
+                self,
+                "Choose another filename",
+                "The export cannot replace the source PDF. Choose a different filename.",
+            )
+            return False
+        return True
+
     def _exported(self, path_str: str) -> None:
         QMessageBox.information(self, "Exported", f"Saved:\n{path_str}")
         self.statusBar().showMessage(f"Exported {Path(path_str).name}", 5000)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.stop_phone_scanner()
+        # A phone response can arrive just before the window closes. Persist any
+        # already-queued desktop action before closing the database connection.
+        self._process_scanner_actions()
         self.save_error_rows()
         self.save_double_rows()
         self.db.close()
@@ -1312,6 +1394,28 @@ def main() -> None:
     app.setStyle("Fusion")
     app.setStyleSheet(build_stylesheet())
 
-    window = PackageAuditApp()
+    try:
+        log_path = configure_diagnostics(APP_DIR)
+    except OSError as exc:
+        QMessageBox.critical(
+            None,
+            "Startup failed",
+            f"Package Audit could not initialize its private data directory:\n{exc}",
+        )
+        sys.exit(1)
+    install_exception_hooks(log_path)
+
+    try:
+        window = PackageAuditApp()
+    except Exception as exc:  # noqa: BLE001 - startup failures must be visible in windowed builds
+        LOGGER.exception("Package Audit failed during startup")
+        QMessageBox.critical(
+            None,
+            "Startup failed",
+            f"Package Audit could not start:\n{exc}\n\nDetails were written to:\n{log_path}",
+        )
+        sys.exit(1)
+
+    LOGGER.info("Package Audit started")
     window.show()
     sys.exit(app.exec())

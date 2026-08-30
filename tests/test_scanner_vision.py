@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 
 import pytest
 import qrcode
@@ -21,7 +22,7 @@ from app.scanner_vision import (
 def _label_image(*, include_qr: bool = True) -> bytes:
     image = Image.new("RGB", (1500, 700), "white")
     draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 58)
+    font = ImageFont.load_default(size=58)
     if include_qr:
         qr = qrcode.make("1Z999AA10123456784").convert("RGB").resize((330, 330))
         image.paste(qr, (30, 30))
@@ -87,6 +88,23 @@ def test_qr_scanning_works_when_ocr_is_unavailable(monkeypatch):
     assert observation.ocr_confidence == 0.0
 
 
+def test_ocr_rotation_attempts_have_a_bounded_total_failure_message(monkeypatch):
+    timeouts = []
+    monkeypatch.setattr(scanner_vision, "find_tesseract", lambda: "/trusted/tesseract")
+
+    def time_out(_image, _executable, timeout):
+        timeouts.append(timeout)
+        raise subprocess.TimeoutExpired("tesseract", timeout)
+
+    monkeypatch.setattr(scanner_vision, "_run_tesseract_once", time_out)
+
+    with pytest.raises(ScanImageError, match="timed out"):
+        scanner_vision._run_tesseract(Image.new("RGB", (200, 200)), timeout=20)
+
+    assert len(timeouts) == 4
+    assert all(0 < timeout <= 8 for timeout in timeouts)
+
+
 @pytest.mark.parametrize("payload", [b"", b"not an image"])
 def test_analyze_image_rejects_invalid_upload(payload):
     with pytest.raises(ScanImageError):
@@ -102,12 +120,26 @@ def test_analyze_image_rejects_tiny_image():
         analyze_image(output.getvalue())
 
 
+def test_oversized_dimensions_are_rejected_before_pixels_are_decoded(monkeypatch):
+    class OversizedImage:
+        width = 10_000
+        height = 10_000
+
+        def load(self):
+            raise AssertionError("pixel data must not be decoded")
+
+    monkeypatch.setattr(scanner_vision.Image, "open", lambda _stream: OversizedImage())
+
+    with pytest.raises(ScanImageError, match="dimensions are too large"):
+        scanner_vision._open_image(b"image header")
+
+
 @pytest.mark.skipif(find_tesseract() is None, reason="Tesseract is not installed")
 @pytest.mark.parametrize("angle", [90, 180, 270])
 def test_analyze_image_recovers_rotated_ocr_without_exif(angle):
     image = Image.new("RGB", (1200, 500), "white")
     draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 54)
+    font = ImageFont.load_default(size=54)
     draw.text((50, 60), "MATHIESEN UNIT 1701S", fill="black", font=font)
     draw.text((50, 190), "1Z999AA10123456784", fill="black", font=font)
     image = image.rotate(angle, expand=True, fillcolor="white")
@@ -117,5 +149,5 @@ def test_analyze_image_recovers_rotated_ocr_without_exif(angle):
     observation = analyze_image(output.getvalue())
 
     assert "1701S" in observation.ocr_text
-    assert "1Z999AA10123456784" in observation.ocr_text
+    assert "1Z999AA10123456784" in observation.ocr_trackings
     assert observation.ocr_confidence >= 60

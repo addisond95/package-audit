@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from app.export_utils import atomic_output_path
 from app.models import (
     AuditEntry,
     DoubleLoggedPackage,
@@ -18,6 +19,7 @@ from app.models import (
     normalize_location,
     normalize_tracking,
     normalize_unit,
+    resolve_last4,
     unit_sort_key,
 )
 
@@ -83,7 +85,7 @@ def make_audit_report(
                     normalize_location(r.location),
                     normalize_carrier(r.carrier),
                     normalize_tracking(r.tracking),
-                    normalize_last4(r.last4),
+                    resolve_last4(r.last4, r.tracking),
                     r.note.strip(),
                 ]
                 for r in package_errors
@@ -103,7 +105,7 @@ def make_audit_report(
                     normalize_location(r.location),
                     normalize_carrier(r.carrier),
                     normalize_tracking(r.tracking),
-                    normalize_last4(r.last4),
+                    resolve_last4(r.last4, r.tracking),
                 ]
                 for r in double_logged
             ],
@@ -127,4 +129,5 @@ def write_audit_report(
         double_logged=double_logged,
         source_pdf_name=source_pdf_name,
     )
-    output_path.write_text(report, encoding="utf-8")
+    with atomic_output_path(output_path) as temporary_path:
+        temporary_path.write_text(report, encoding="utf-8")

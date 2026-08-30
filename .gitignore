@@ -1,6 +1,10 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+.coverage
+.pytest_cache/
+.ruff_cache/
+htmlcov/
 build/
 dist/
 wheels/
@@ -18,5 +22,8 @@ build/
 dist/
 *.spec.bak
 
-# Source exports may contain resident data — keep them local
-data/*.pdf
+# Source files and generated exports may contain resident data — keep them local
+data/*
+!data/.gitkeep
+exports/*
+!exports/.gitkeep
