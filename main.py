@@ -57,6 +57,8 @@ def export_smoke() -> None:
 
 
 def scanner_smoke() -> None:
+    import io
+
     import qrcode
     import zxingcpp
     from PIL import Image
@@ -76,13 +78,23 @@ def scanner_smoke() -> None:
         "smoke",
         [AuditEntry("one", 0, "1701S", "Mathiesen", f"UPS - #1 - {payload}", "", "")],
     )
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, format="PNG")
+    scanned = coordinator.process_image(image_bytes.getvalue())
+    if scanned.get("status") != "confirm" or scanned.get("unit") != "1701S":
+        raise RuntimeError("Phone scanner did not resolve the exact tracking number to its audit unit.")
+    coordinator.drain_actions()
+    confirmed = coordinator.confirm(scanned["scan_id"], "one")
+    if confirmed.get("status") != "matched":
+        raise RuntimeError("Phone scanner confirmation did not queue the audit match.")
+    coordinator.drain_actions()
     web_app = create_scanner_app(coordinator, "123456", "scanner-smoke-secret")
     web_app.config["TESTING"] = True
     client = web_app.test_client()
     if client.post("/pair", data={"code": "123456"}).status_code != 302:
         raise RuntimeError("Phone scanner pairing smoke test failed.")
     phone_page = client.get("/scanner")
-    if phone_page.status_code != 200 or b"Take package photo" not in phone_page.data:
+    if phone_page.status_code != 200 or b"Scan package" not in phone_page.data:
         raise RuntimeError("Phone scanner interface smoke test failed.")
     status = client.get("/api/status").get_json()
     if status.get("packages") != 1 or status.get("remaining") != 1:

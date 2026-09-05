@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QTableWidgetItem
 
 import app.main_window as main_window
@@ -124,6 +125,47 @@ def test_search_scopes_bulk_marking_and_unchecked_filter(window):
     assert [entry.audited for entry in window.entries] == [True, False]
     window.unchecked_only.setChecked(True)
     assert window.table.rowCount() == 0
+
+
+def test_search_arrow_enter_marks_selected_row_and_returns_to_search(window, application):
+    window.entries = [
+        _entry("jane", "0205S", "Jane Doe"),
+        _entry("john", "3904S", "John Doe"),
+    ]
+    window._refresh_table()
+    window.show()
+    window.search_box.setFocus()
+    window.search_box.setText("doe")
+    application.processEvents()
+
+    QTest.keyClick(window.search_box, Qt.Key_Down)
+    QTest.keyClick(window.table, Qt.Key_Down)
+    selected_index = window.table.item(window.table.currentRow(), 0).data(main_window.ENTRY_INDEX_ROLE)
+    QTest.keyClick(window.table, Qt.Key_Return)
+    application.processEvents()
+
+    assert window.entries[selected_index].audited is True
+    assert window.search_box.hasFocus()
+    assert window.search_box.selectedText() == "doe"
+
+
+def test_enter_marks_a_single_search_result_without_leaving_search(window, application):
+    window.entries = [
+        _entry("jane", "0205S", "Jane Doe"),
+        _entry("john", "3904S", "John Doe"),
+    ]
+    window._refresh_table()
+    window.show()
+    window.search_box.setText("0205S")
+    window.search_box.setFocus()
+    application.processEvents()
+
+    QTest.keyClick(window.search_box, Qt.Key_Return)
+    application.processEvents()
+
+    assert [entry.audited for entry in window.entries] == [True, False]
+    assert window.search_box.hasFocus()
+    assert window.search_box.selectedText() == "0205S"
 
 
 def test_manual_package_type_normalizes_to_pkg_in_both_sections(window):
@@ -345,7 +387,7 @@ def test_scanner_not_found_is_idempotent_red_alert_and_undo(window):
 
 
 def test_scanner_unit_only_not_found_row_is_removed_by_undo(window):
-    observation = ScanObservation(ocr_text="UNIT 9901S", carrier="PKG")
+    observation = ScanObservation(carrier="PKG")
     decision = ScanDecision(
         status="not_found",
         confidence=0.75,
@@ -399,7 +441,7 @@ def test_duplicate_undo_preserves_other_blank_tracking_rows(window):
     )
     entry = _entry("one", "0205S", "Jane Doe")
     window.entries = [entry]
-    observation = ScanObservation(ocr_text="UNIT 0205S", carrier="UPS")
+    observation = ScanObservation(carrier="UPS")
     decision = ScanDecision(
         status="duplicate",
         confidence=0.8,
@@ -420,41 +462,6 @@ def test_duplicate_undo_preserves_other_blank_tracking_rows(window):
     assert (remaining[0].carrier, remaining[0].last4) == ("USPS", "1111")
 
 
-def test_scanner_duplicate_logs_unknown_conflicting_unit(window):
-    tracking = "1Z999AA10123456784"
-    window.entries = [AuditEntry("one", 0, "0205S", "Jane", f"UPS - #1 - {tracking}", "South", "", False)]
-    observation = ScanObservation(barcodes=(tracking,), ocr_text="UNIT 9999S", carrier="UPS")
-    decision = window.scanner_coordinator.__class__()
-    decision.configure("ui-test", window.entries)
-    result = decision.process_observation(observation)
-    action = decision.drain_actions()[0]
-
-    window._apply_scanner_action(action)
-
-    assert result["status"] == "duplicate"
-    assert {row.unit for row in window.db.load_double_logged("ui-test")} == {"0205S", "9999S"}
-
-
-def test_same_unseen_tracking_scanned_for_two_units_becomes_duplicate(window):
-    tracking = "1Z000ZZ00000000001"
-    for scan_id, unit in (("first", "9901S"), ("second", "9902S")):
-        observation = ScanObservation(barcodes=(tracking,), ocr_text=f"UNIT {unit}", carrier="UPS")
-        decision = ScanDecision(
-            status="not_found",
-            confidence=0.98,
-            message="Not found",
-            tracking=tracking,
-            unit=unit,
-            carrier="UPS",
-            scan_key=observation.scan_key,
-        )
-        window._apply_scanner_action(ScannerAction(scan_id, "not_found", observation, decision))
-
-    assert {row.unit for row in window.db.load_double_logged("ui-test")} == {"9901S", "9902S"}
-    alerts = window.db.load_scanner_alerts("ui-test", include_resolved=False)
-    assert any(alert.alert_key == f"duplicate_scan:{tracking}" for alert in alerts)
-
-
 def test_automatic_manual_rows_use_alert_colors(window):
     window._populate_errors_table(
         [PackageError("9901S", "", "PKG", "0001", "Not logged", "1Z000ZZ00000000001")]
@@ -468,7 +475,7 @@ def test_automatic_manual_rows_use_alert_colors(window):
 
 
 def test_review_alert_can_be_resolved_and_reopened(window):
-    observation = ScanObservation(ocr_text="JANE UNIT 0205S")
+    observation = ScanObservation()
     decision = ScanDecision(
         status="review",
         confidence=0.75,

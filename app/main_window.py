@@ -9,7 +9,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -250,6 +250,7 @@ class PackageAuditApp(QMainWindow):
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setPlaceholderText("Search unit, resident, package, tracking, tower...")
         self.search_box.textChanged.connect(self._refresh_table)
+        self.search_box.installEventFilter(self)
 
         self.unchecked_only = QCheckBox("Unchecked only")
         self.unchecked_only.stateChanged.connect(self._refresh_table)
@@ -269,6 +270,7 @@ class PackageAuditApp(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.installEventFilter(self)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(30)
 
@@ -549,6 +551,33 @@ class PackageAuditApp(QMainWindow):
             self.db.set_state(self.pdf_hash, entry.item_id, entry.audited)
             self.scanner_coordinator.configure(self.pdf_hash, self.entries)
         self._refresh_table()
+        self._focus_search_for_next_unit()
+
+    def eventFilter(self, watched, event) -> bool:
+        """Make the unit-search workflow usable without leaving the keyboard."""
+        if event.type() == QEvent.KeyPress:
+            key = event.key()
+            if watched is self.search_box:
+                if key in (Qt.Key_Down, Qt.Key_Up) and self.table.rowCount():
+                    row = 0 if key == Qt.Key_Down else self.table.rowCount() - 1
+                    self.table.setCurrentCell(row, 1)
+                    self.table.selectRow(row)
+                    self.table.setFocus(Qt.ShortcutFocusReason)
+                    return True
+                if key in (Qt.Key_Return, Qt.Key_Enter) and self.table.rowCount() == 1:
+                    self.on_audit_cell_clicked(0, 0)
+                    return True
+            elif watched is self.table and key in (Qt.Key_Return, Qt.Key_Enter):
+                row = self.table.currentRow()
+                if row >= 0:
+                    self.on_audit_cell_clicked(row, 0)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _focus_search_for_next_unit(self) -> None:
+        """Return to search and select the old query for immediate replacement."""
+        self.search_box.setFocus(Qt.ShortcutFocusReason)
+        self.search_box.selectAll()
 
     def mark_all_visible(self) -> None:
         """Mark every currently visible audit row (respecting search/filter)."""
@@ -759,7 +788,6 @@ class PackageAuditApp(QMainWindow):
         self.scanner_coordinator.configure(
             self.pdf_hash,
             self.entries,
-            self.db.load_scanner_model(),
         )
         if self.scanner_server is None:
             self.scanner_server = ScannerServer(self.scanner_coordinator)
@@ -792,6 +820,10 @@ class PackageAuditApp(QMainWindow):
             dialog.deleteLater()
         if self.scanner_server:
             self.scanner_server.stop()
+            # Persist requests that finished before the server stopped, then
+            # invalidate any worker request that is still decoding an image.
+            self._process_scanner_actions()
+            self.scanner_coordinator.invalidate_sessions()
         self.scanner_server = None
         if hasattr(self, "scanner_button"):
             self.scanner_button.setText("Start Phone Scanner")
@@ -808,7 +840,6 @@ class PackageAuditApp(QMainWindow):
         self.scanner_coordinator.configure(
             self.pdf_hash,
             self.entries,
-            self.db.load_scanner_model(),
         )
         entries_by_id = {entry.item_id: entry for entry in self.entries}
         for tracking, records in self.scanner_coordinator.duplicate_groups():
@@ -873,24 +904,6 @@ class PackageAuditApp(QMainWindow):
             return
         if action.kind == "reject":
             self._undo_scanner_action(action.scan_id, save_event=False)
-            if action.model:
-                self.db.save_scanner_model(action.model)
-            suggested_candidate = next(
-                (
-                    candidate
-                    for candidate in action.decision.candidates
-                    if candidate.item_id == action.suggested_item_id
-                ),
-                None,
-            )
-            self.db.record_scanner_feedback(
-                self.pdf_hash,
-                action.observation.scan_key,
-                "rejected",
-                action.suggested_item_id,
-                "",
-                suggested_candidate.features if suggested_candidate else {},
-            )
             self._save_scanner_event(action, status="rejected")
             return
 
@@ -903,26 +916,6 @@ class PackageAuditApp(QMainWindow):
                 self.db.set_state(self.pdf_hash, entry.item_id, True)
                 review_key = f"review:{action.scan_id}"
                 self.db.resolve_scanner_alert(self.pdf_hash, review_key)
-                if action.model:
-                    self.db.save_scanner_model(action.model)
-                    selected_candidate = next(
-                        (
-                            candidate
-                            for candidate in action.decision.candidates
-                            if candidate.item_id == action.item_id
-                        ),
-                        None,
-                    )
-                    self.db.record_scanner_feedback(
-                        self.pdf_hash,
-                        action.observation.scan_key,
-                        "corrected"
-                        if action.suggested_item_id and action.suggested_item_id != action.item_id
-                        else "accepted",
-                        action.suggested_item_id,
-                        action.item_id,
-                        selected_candidate.features if selected_candidate else {},
-                    )
             self._save_scanner_event(action)
             return
 
@@ -956,38 +949,6 @@ class PackageAuditApp(QMainWindow):
                 history["package_error"] = package_error
             if alert_key not in existing_keys:
                 history["alerts"].append(alert_key)
-            previous_units = self.db.scanner_units_for_tracking(self.pdf_hash, tracking) - {
-                action.decision.unit
-            }
-            if tracking and action.decision.unit and previous_units:
-                duplicate_key = f"duplicate_scan:{tracking}"
-                duplicate_units = previous_units | {action.decision.unit}
-                for unit in duplicate_units:
-                    duplicate_row = DoubleLoggedPackage(
-                        unit=unit,
-                        location="",
-                        carrier=action.decision.carrier,
-                        last4=tracking[-4:],
-                        tracking=tracking,
-                    )
-                    inserted_double = self.db.add_double_logged_if_missing(self.pdf_hash, duplicate_row)
-                    if inserted_double:
-                        history["double_rows"].append(duplicate_row)
-                self.db.upsert_scanner_alert(
-                    self.pdf_hash,
-                    ScannerAlert(
-                        alert_key=duplicate_key,
-                        kind="duplicate",
-                        severity="warning",
-                        unit=" / ".join(sorted(duplicate_units)),
-                        carrier=action.decision.carrier,
-                        tracking=tracking,
-                        last4=tracking[-4:],
-                        message="The same unlogged tracking was scanned for different units.",
-                    ),
-                )
-                if duplicate_key not in existing_keys:
-                    history["alerts"].append(duplicate_key)
             self.db.resolve_scanner_alert(self.pdf_hash, f"review:{action.scan_id}")
             self._save_scanner_event(action)
             return
@@ -1378,9 +1339,6 @@ class PackageAuditApp(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.stop_phone_scanner()
-        # A phone response can arrive just before the window closes. Persist any
-        # already-queued desktop action before closing the database connection.
-        self._process_scanner_actions()
         self.save_error_rows()
         self.save_double_rows()
         self.db.close()

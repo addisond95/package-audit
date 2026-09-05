@@ -34,21 +34,21 @@ transcription work by capturing audit observations directly as structured data.
 **Audit workflow**
 - One‑click verification with row highlighting
 - Live search across unit, resident, package, tracking, and tower
+- Keyboard-first unit lookup: type, use Up/Down, and press Enter to mark a row; focus returns to search
 - "Unchecked only" filter
 - Bulk *Mark All Visible* / *Unmark All Visible* (respect the active search/filter)
 - Progress is saved automatically and resumes when the same PDF is reopened
 
 **Phone scanner (local and free)**
 - Pair a phone browser over the same Wi‑Fi using a temporary six-digit code or QR code
-- Scan QR codes, 1D/2D barcodes, or photograph a printed package label
+- Capture one tracking barcode at a time; no resident-name or unit OCR is performed
 - See live audited/remaining totals, alert counts, and desktop connection state on the phone
-- Take a new photo or choose an existing one; large camera photos are resized on the phone before upload
-- Decode barcodes locally with ZXing and printed text locally with Tesseract OCR
-- Match only tracking number, unit, and any listed resident surname; carrier is never a match signal
-- Automatically mark confident matches, ask "Do you mean?" for uncertain matches, and log reliable
-  barcode no-matches as `Not logged`
+- Tap **Scan package**, take the picture, and the phone automatically resizes and submits it
+- Decode barcodes locally on the desktop with ZXing; no slow OCR or cloud service is involved
+- Require an exact full-tracking-number match—never fuzzy matching, names, units, or last-four alone
+- Show the audit's logged unit on the phone and mark it present only after explicit confirmation
+- Log reliable tracking barcodes absent from the audit as `Not logged`
 - Detect duplicate tracking across units, create alerts, preserve full tracking values, and support undo
-- Learn confidence weights and recurring OCR corrections from confirmations and rejections
 
 **Manual report sections**
 - *Package Errors* — `Unit | Location | Carrier | Tracking | Last 4 | Note`
@@ -87,9 +87,9 @@ package-audit/
 │   ├── export_pdf.py       # Highlighted PDF export
 │   ├── export_utils.py     # Safe CSV cells + atomic private exports
 │   ├── delegates.py        # Table cell editors (dropdowns)
-│   ├── scanner_matching.py # Tracking/unit/surname confidence matching
+│   ├── scanner_matching.py # Exact tracking-number lookup
 │   ├── scanner_server.py   # Paired local-network phone web app
-│   ├── scanner_vision.py   # Local barcode decoding and OCR
+│   ├── scanner_vision.py   # Fast local barcode decoding
 │   ├── scanner_ui.py       # Desktop pairing dialog
 │   ├── theme.py            # Qt stylesheet
 │   └── main_window.py      # Main window and application wiring
@@ -108,9 +108,6 @@ This project uses [uv](https://docs.astral.sh/uv/).
 # Install dependencies into a virtual environment
 uv sync
 
-# One-time local OCR installation on macOS
-brew install tesseract
-
 # Launch the application
 uv run python main.py
 
@@ -118,9 +115,11 @@ uv run python main.py
 uv run package-audit
 ```
 
-On Windows, barcode scanning works in the packaged app without extra setup. For
-printed-text OCR, install Tesseract OCR in its standard `Program Files` location
-or make `tesseract.exe` available on `PATH`.
+Barcode scanning is included in the Python environment and packaged application;
+there is no separate OCR program to install.
+
+For a complete terminal walkthrough, phone-pairing steps, and connection troubleshooting, see
+[TERMINAL_USAGE.md](TERMINAL_USAGE.md).
 
 ### Development
 
@@ -168,18 +167,17 @@ flowchart LR
 2. Click **Start Phone Scanner**.
 3. Scan the displayed QR code with a phone on the same Wi‑Fi, or enter the shown URL and pairing code.
    The desktop dialog confirms when the phone is connected and can copy the address when manual entry is easier.
-4. Tap **Take package photo** or **Choose photo**. The image is resized on the phone when useful, processed
-   in memory on the desktop, and is not saved.
-5. High-confidence matches are marked in the desktop audit. Medium-confidence results ask for a choice.
-   Reliable barcodes absent from the audit are logged in Package Errors as `Not logged`. The phone only offers
-   a manual `Not logged` action when it actually read a reliable tracking number or an unambiguous labeled unit.
-6. Duplicate tracking produces a Double Logged row and an orange alert. Red means not logged, yellow means
-  review, and the ordinary audit highlight remains green.
+4. Tap **Scan package**, frame one tracking barcode, take the picture, and accept the phone's camera preview.
+   The image is resized and submitted automatically—there is no app-level Submit step. **Existing photo** is a
+   fallback for an image already in the photo library.
+5. The phone shows the exact unit recorded for that tracking number. Check that unit against the label, then tap
+   **Confirm unit …**. Only that confirmation marks the desktop audit row present.
+6. A reliable tracking barcode absent from the audit is logged in Package Errors as `Not logged`. Duplicate
+   tracking produces a Double Logged row and orange alert. An unreadable or multi-label image asks for a rescan.
 
 The phone scanner binds to the local network only, requires a temporary pairing code, uses a signed browser
 session plus CSRF checks, and does not require internet access or a paid service. Keep the phone and computer
-on a trusted private Wi‑Fi network. If OCR is unavailable, barcode and QR scanning still work and the pairing
-screen reports the missing OCR capability.
+on a trusted private Wi‑Fi network. Photos are decoded in memory and are not saved.
 
 If the phone reports that the desktop is unavailable, keep the desktop scanner running and confirm both devices
 are on the same non-guest Wi‑Fi; VPNs and access-point client isolation can prevent local-device connections.
@@ -199,10 +197,15 @@ time the scanner starts. Allow it only on a trusted private network.
 
 ### Keyboard shortcuts
 
-When the audit table is focused:
+In the Audit tab:
 
 | Shortcut | Action |
 | --- | --- |
+| Type in search | Filter by unit, resident, tracking, package, or tower |
+| `Down` / `Up` from search | Move into the first / last visible result |
+| `Down` / `Up` in results | Move between rows |
+| `Enter` | Mark/unmark the selected row and return to search |
+| `Enter` with one search result | Mark/unmark it directly and stay in search |
 | `Ctrl+A` | Mark all visible |
 | `Ctrl+Shift+A` | Unmark all visible |
 
@@ -268,9 +271,12 @@ restores checked rows and manual entries automatically.
 
 ## Release status
 
-**v0.5 (current)** — local phone QR/barcode/OCR scanner, confidence review,
-automatic Not logged and duplicate records, alerts, undo, and adaptive matching,
-while preserving the complete manual workflow and exports.
+**v0.6 (current)** — fast tracking-only phone scanning, exact audit lookup,
+explicit unit confirmation, automatic image submission, and keyboard-first desktop
+auditing, while preserving Not logged/duplicate records, alerts, undo, and exports.
+
+**v0.5** — local phone QR/barcode/OCR scanner, confidence review, automatic
+Not logged and duplicate records, alerts, undo, and adaptive matching.
 
 **v0.4** — complete manual audit workflow: parsing, verification, search/filter,
 bulk actions, manual report sections, persistence, and exports.

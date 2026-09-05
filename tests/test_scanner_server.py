@@ -6,7 +6,6 @@ import io
 import re
 import time
 import urllib.request
-from dataclasses import replace
 
 import pytest
 
@@ -44,7 +43,7 @@ def entries():
     ]
 
 
-def test_coordinator_auto_match_and_repeated_scan_are_idempotent(entries):
+def test_exact_scan_waits_for_confirmation_and_repeats_idempotently(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
     observation = ScanObservation(barcodes=("1Z999AA10123456784",))
@@ -53,91 +52,86 @@ def test_coordinator_auto_match_and_repeated_scan_are_idempotent(entries):
     actions = coordinator.drain_actions()
     repeated = coordinator.process_observation(observation)
 
-    assert first["status"] == "matched"
-    assert len(actions) == 1 and actions[0].kind == "match"
-    assert actions[0].model is None
-    assert coordinator.model.examples == 0
+    assert first["status"] == "confirm"
+    assert first["unit"] == "1701S"
+    assert first["candidates"][0]["resident"] == "Mathiesen"
+    assert len(actions) == 1 and actions[0].kind == "event"
     assert repeated["scan_id"] == first["scan_id"]
     assert repeated["repeated"] is True
     assert coordinator.drain_actions() == []
 
 
-def test_coordinator_review_confirmation_updates_model(entries):
+def test_confirmation_queues_match_and_replay_is_idempotent(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
-    result = coordinator.process_observation(
-        ScanObservation(ocr_text="MATHIESEN UNIT 1701S", ocr_confidence=90)
-    )
-    assert result["status"] == "review"
-    assert coordinator.drain_actions()[0].kind == "review"
-    before = coordinator.model.examples
+    result = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    coordinator.drain_actions()
 
     confirmed = coordinator.confirm(result["scan_id"], "one")
     action = coordinator.drain_actions()[0]
-
-    assert confirmed["status"] == "matched"
-    assert action.kind == "match" and action.item_id == "one"
-    assert action.model is not None
-    assert coordinator.model.examples > before
-
-
-def test_confirmation_replay_does_not_retrain_or_queue_another_action(entries):
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    result = coordinator.process_observation(
-        ScanObservation(ocr_text="MATHIESEN UNIT 1701S", ocr_confidence=90)
-    )
-    coordinator.drain_actions()
-    coordinator.confirm(result["scan_id"], "one")
-    coordinator.drain_actions()
-    examples = coordinator.model.examples
-
     repeated = coordinator.confirm(result["scan_id"], "one")
 
+    assert confirmed["status"] == "matched"
+    assert confirmed["can_undo"] is True
+    assert action.kind == "match" and action.item_id == "one"
     assert repeated["repeated"] is True
-    assert coordinator.model.examples == examples
     assert coordinator.drain_actions() == []
 
 
-def test_multiple_known_barcodes_preserve_selected_tracking_on_confirmation(entries):
+def test_confirmation_rejects_other_items_and_multi_label_scan(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
     result = coordinator.process_observation(
         ScanObservation(barcodes=("1Z999AA10123456784", "1Z999AA10123450000"))
     )
+
+    assert result["status"] == "poor_scan"
+    with pytest.raises(ValueError, match="not waiting"):
+        coordinator.confirm(result["scan_id"], "two")
+
+    exact = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    with pytest.raises(ValueError, match="not a candidate"):
+        coordinator.confirm(exact["scan_id"], "two")
+
+
+def test_reject_allows_a_fresh_scan_of_the_same_tracking(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    observation = ScanObservation(barcodes=("1Z999AA10123456784",))
+    first = coordinator.process_observation(observation)
     coordinator.drain_actions()
 
-    confirmed = coordinator.confirm(result["scan_id"], "two")
+    rejected = coordinator.reject(first["scan_id"])
+    coordinator.drain_actions()
+    second = coordinator.process_observation(observation)
+
+    assert rejected["status"] == "rejected"
+    assert rejected["can_mark_not_found"] is False
+    assert second["status"] == "confirm"
+    assert second["scan_id"] != first["scan_id"]
+
+
+def test_unknown_tracking_is_logged_not_found_and_can_be_undone(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+
+    result = coordinator.process_observation(ScanObservation(barcodes=("1Z000ZZ00000000001",)))
     action = coordinator.drain_actions()[0]
+    undone = coordinator.undo(result["scan_id"])
 
-    assert confirmed["tracking"] == "1Z999AA10123450000"
-    assert action.decision.tracking == "1Z999AA10123450000"
+    assert result["status"] == "not_found"
+    assert result["unit"] == ""
+    assert action.kind == "not_found"
+    assert undone["status"] == "undo_queued"
+    assert coordinator.drain_actions()[0].kind == "undo"
 
 
-def test_coordinator_reject_not_found_and_undo(entries):
+def test_undone_match_rejects_late_follow_up_actions(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
-    result = coordinator.process_observation(
-        ScanObservation(ocr_text="MATHIESEN UNIT 1701S", ocr_confidence=90)
-    )
-    scan_id = result["scan_id"]
-    assert coordinator.drain_actions()[0].kind == "review"
-
-    rejected = coordinator.reject(scan_id)
-    not_found = coordinator.mark_not_found(scan_id)
-    undone = coordinator.undo(scan_id)
-    assert rejected["status"] == "rejected" and rejected["can_mark_not_found"] is True
-    assert not_found["status"] == "not_found" and not_found["unit"] == "1701S"
-    assert undone["status"] == "undo_queued" and undone["can_mark_not_found"] is False
-    assert [action.kind for action in coordinator.drain_actions()] == ["reject", "not_found", "undo"]
-
-
-def test_undone_scan_rejects_late_follow_up_actions(entries):
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    result = coordinator.process_observation(
-        ScanObservation(ocr_text="MATHIESEN UNIT 1701S", ocr_confidence=90)
-    )
+    result = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    coordinator.drain_actions()
+    coordinator.confirm(result["scan_id"], "one")
     coordinator.drain_actions()
 
     coordinator.undo(result["scan_id"])
@@ -161,93 +155,63 @@ def test_already_audited_scan_does_not_offer_or_accept_undo(entries):
         coordinator.undo(result["scan_id"])
 
 
-def test_not_found_requires_observed_identifier_and_never_inherits_suggested_unit(entries):
+def test_failed_decode_cannot_be_marked_not_found_or_cached(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
-    poor = coordinator.process_observation(ScanObservation(ocr_text="blurred shipping label"))
-    assert poor["status"] == "poor_scan"
-    assert poor["can_mark_not_found"] is False
-    with pytest.raises(ValueError, match="Retake"):
-        coordinator.mark_not_found(poor["scan_id"])
+    first = coordinator.process_observation(ScanObservation())
+    second = coordinator.process_observation(ScanObservation())
 
-    review = coordinator.process_observation(
-        ScanObservation(ocr_text="MATHIESEN UNIT 1701S", ocr_confidence=90)
-    )
-    stored = coordinator._scans[review["scan_id"]]
-    stored.decision = replace(stored.decision, unit="9999S")
-    not_found = coordinator.mark_not_found(review["scan_id"])
-
-    assert not_found["unit"] == "1701S"
-
-
-def test_known_match_cannot_be_changed_to_not_found_without_rejection(entries):
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    result = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
-
-    assert result["status"] == "matched"
-    assert result["can_mark_not_found"] is False
-    with pytest.raises(ValueError, match="Retake"):
-        coordinator.mark_not_found(result["scan_id"])
-
-
-def test_rejected_identical_photo_is_reevaluated(entries):
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    observation = ScanObservation(ocr_text="MATHIESEN UNIT 1701S", ocr_confidence=90)
-    first = coordinator.process_observation(observation)
-    coordinator.drain_actions()
-    coordinator.reject(first["scan_id"])
-    coordinator.drain_actions()
-
-    second = coordinator.process_observation(observation)
-
+    assert first["status"] == "poor_scan"
+    assert first["can_mark_not_found"] is False
     assert second["scan_id"] != first["scan_id"]
-    assert second["repeated"] is False
-    assert second["status"] == "review"
+    with pytest.raises(ValueError, match="tracking barcode"):
+        coordinator.mark_not_found(first["scan_id"])
 
 
-def test_switching_pdf_discards_queued_actions(entries):
+def test_switching_pdf_discards_queued_actions_and_invalidates_generation(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("old-hash", entries)
     coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    generation = coordinator.generation
 
     coordinator.configure("new-hash", entries)
 
+    assert coordinator.generation == generation + 1
     assert coordinator.drain_actions() == []
 
 
-def test_explicit_scan_reset_allows_same_image_again(entries):
+def test_explicit_scan_reset_allows_same_image_again_and_discards_actions(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
     observation = ScanObservation(barcodes=("1Z999AA10123456784",))
     first = coordinator.process_observation(observation)
-    coordinator.drain_actions()
 
     coordinator.configure("hash", entries, reset_scans=True)
     second = coordinator.process_observation(observation)
 
     assert second["scan_id"] != first["scan_id"]
+    assert [action.scan_id for action in coordinator.drain_actions()] == [second["scan_id"]]
 
 
-def test_explicit_scan_reset_discards_same_audit_queued_actions(entries):
+def test_session_invalidation_discards_pending_actions_and_phone_activity(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
+    coordinator.note_phone_activity("phone-one")
     coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    generation = coordinator.generation
 
-    coordinator.configure("hash", entries, reset_scans=True)
+    coordinator.invalidate_sessions()
 
+    assert coordinator.generation == generation + 1
+    assert coordinator.active_phone_count() == 0
     assert coordinator.drain_actions() == []
 
 
-def test_coordinator_rejects_invalid_or_expired_candidate(entries):
+def test_expired_scan_is_rejected(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
-    result = coordinator.process_observation(ScanObservation(ocr_text="MATHIESEN UNIT 1701S"))
 
-    with pytest.raises(ValueError):
-        coordinator.confirm(result["scan_id"], "not-a-candidate")
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError, match="expired"):
         coordinator.undo("expired")
 
 
@@ -277,7 +241,7 @@ def test_http_requires_pairing_and_rejects_public_addresses(entries):
     assert client.post("/pair", data={"code": "wrong"}).status_code == 403
 
 
-def test_pairing_page_escapes_untrusted_prefill(entries):
+def test_pairing_page_escapes_prefill_and_sets_private_headers(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
     app = create_scanner_app(coordinator, "123456", "secret")
@@ -292,7 +256,7 @@ def test_pairing_page_escapes_untrusted_prefill(entries):
     assert "default-src 'self'" in response.headers["Content-Security-Policy"]
 
 
-def test_http_pairing_rate_limit(entries):
+def test_http_pairing_rate_limits_and_expires(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
     app = create_scanner_app(coordinator, "123456", "secret")
@@ -302,8 +266,17 @@ def test_http_pairing_rate_limit(entries):
     responses = [client.post("/pair", data={"code": "wrong"}) for _ in range(9)]
     assert responses[-1].status_code == 429
 
+    expired_app = create_scanner_app(
+        coordinator,
+        "123456",
+        "secret",
+        pairing_expires_at=time.monotonic() - 1,
+    )
+    expired_app.config["TESTING"] = True
+    assert expired_app.test_client().post("/pair", data={"code": "123456"}).status_code == 410
 
-def test_http_global_pairing_rate_limit_and_expiration(entries):
+
+def test_http_global_pairing_rate_limit(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
     app = create_scanner_app(coordinator, "123456", "secret")
@@ -320,15 +293,6 @@ def test_http_global_pairing_rate_limit_and_expiration(entries):
     ]
     assert responses[-1].status_code == 429
 
-    expired_app = create_scanner_app(
-        coordinator,
-        "123456",
-        "secret",
-        pairing_expires_at=time.monotonic() - 1,
-    )
-    expired_app.config["TESTING"] = True
-    assert expired_app.test_client().post("/pair", data={"code": "123456"}).status_code == 410
-
 
 def test_paired_session_is_invalidated_when_audit_changes(entries):
     coordinator, client, _csrf = _paired_client(entries)
@@ -338,18 +302,37 @@ def test_paired_session_is_invalidated_when_audit_changes(entries):
     assert client.get("/api/status").status_code == 401
 
 
-def test_http_status_csrf_scan_and_confirmation(entries, monkeypatch):
+def test_scan_is_discarded_when_audit_changes_during_processing(entries, monkeypatch):
+    coordinator, client, csrf = _paired_client(entries)
+
+    def analyze_after_audit_change(_image):
+        coordinator.configure("new-hash", entries)
+        return ScanObservation(barcodes=("1Z999AA10123456784",))
+
+    monkeypatch.setattr(scanner_server, "analyze_image", analyze_after_audit_change)
+
+    response = client.post(
+        "/api/scan",
+        data={"image": (io.BytesIO(b"image"), "label.jpg")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 401
+    assert "audit changed" in response.get_json()["error"]
+    assert coordinator.drain_actions() == []
+
+
+def test_http_status_scan_and_confirmation(entries, monkeypatch):
     coordinator, client, csrf = _paired_client(entries)
     monkeypatch.setattr(
         scanner_server,
         "analyze_image",
-        lambda _image: ScanObservation(ocr_text="MATHIESEN UNIT 1701S", ocr_confidence=90),
+        lambda _image: ScanObservation(barcodes=("1Z999AA10123456784",)),
     )
 
     status = client.get("/api/status")
     assert status.status_code == 200
     assert status.get_json()["packages"] == 2
-    assert status.get_json()["audited"] == 0
     assert status.get_json()["remaining"] == 2
     assert client.post("/api/scan", data={"image": (io.BytesIO(b"image"), "label.jpg")}).status_code == 403
 
@@ -359,7 +342,8 @@ def test_http_status_csrf_scan_and_confirmation(entries, monkeypatch):
         headers={"X-CSRF-Token": csrf},
     )
     result = response.get_json()
-    assert response.status_code == 200 and result["status"] == "review"
+    assert response.status_code == 200 and result["status"] == "confirm"
+    assert result["unit"] == "1701S"
 
     confirmed = client.post(
         f"/api/scans/{result['scan_id']}/confirm",
@@ -370,27 +354,25 @@ def test_http_status_csrf_scan_and_confirmation(entries, monkeypatch):
     assert confirmed.get_json()["status"] == "matched"
 
 
-def test_phone_page_exposes_progress_connection_and_fast_upload_controls(entries):
+def test_phone_page_exposes_one_tap_auto_upload_and_confirmation(entries):
     _coordinator, client, _csrf = _paired_client(entries)
 
     scanner = client.get("/scanner")
 
     assert b'id="connection"' in scanner.data
-    assert b"Take package photo" in scanner.data
-    assert b"Choose photo" in scanner.data
+    assert b"Scan package" in scanner.data
+    assert b"Existing photo" in scanner.data
+    assert b"tracking barcode only" in scanner.data
     assert b"prepareImage" in scanner.data
-    assert b"can_mark_not_found" in scanner.data
+    assert b"Confirm unit" in scanner.data
+    assert b"requestTimeoutMs" in scanner.data
+    assert b"Take package photo" not in scanner.data
     assert b"maximum-scale" not in scanner.data
-    assert b"button.disabled=disabled" in scanner.data
 
 
 def test_http_not_found_rejects_unusable_scan(entries, monkeypatch):
     _coordinator, client, csrf = _paired_client(entries)
-    monkeypatch.setattr(
-        scanner_server,
-        "analyze_image",
-        lambda _image: ScanObservation(ocr_text="blurred shipping label"),
-    )
+    monkeypatch.setattr(scanner_server, "analyze_image", lambda _image: ScanObservation())
     scanned = client.post(
         "/api/scan",
         data={"image": (io.BytesIO(b"image"), "label.jpg")},
@@ -403,7 +385,7 @@ def test_http_not_found_rejects_unusable_scan(entries, monkeypatch):
     )
 
     assert response.status_code == 400
-    assert "Retake" in response.get_json()["error"]
+    assert "tracking barcode" in response.get_json()["error"]
 
 
 def test_status_reports_audited_progress_and_phone_heartbeats(entries):
@@ -420,23 +402,20 @@ def test_status_reports_audited_progress_and_phone_heartbeats(entries):
     assert coordinator.active_phone_count() == 0
 
 
-def test_http_scan_rejects_missing_and_invalid_images(entries):
-    _coordinator, client, csrf = _paired_client(entries)
+def test_http_scan_rejects_missing_invalid_and_busy_images(entries):
+    coordinator, client, csrf = _paired_client(entries)
     assert client.post("/api/scan", headers={"X-CSRF-Token": csrf}).status_code == 400
-    response = client.post(
+    invalid = client.post(
         "/api/scan",
         data={"image": (io.BytesIO(b"not an image"), "bad.jpg")},
         headers={"X-CSRF-Token": csrf},
     )
-    assert response.status_code == 422
+    assert invalid.status_code == 422
 
-
-def test_http_scan_returns_busy_when_processing_slots_are_full(entries):
-    coordinator, client, csrf = _paired_client(entries)
     assert coordinator._scan_slots.acquire()
     assert coordinator._scan_slots.acquire()
     try:
-        response = client.post(
+        busy = client.post(
             "/api/scan",
             data={"image": (io.BytesIO(b"image"), "label.jpg")},
             headers={"X-CSRF-Token": csrf},
@@ -444,20 +423,21 @@ def test_http_scan_returns_busy_when_processing_slots_are_full(entries):
     finally:
         coordinator._scan_slots.release()
         coordinator._scan_slots.release()
-    assert response.status_code == 429
+    assert busy.status_code == 429
 
 
 def test_scan_cache_expires_and_stays_bounded(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
-    first = coordinator.process_observation(ScanObservation(ocr_text="first label"))
+    first_observation = ScanObservation(barcodes=("1Z000ZZ00000000001",))
+    first = coordinator.process_observation(first_observation)
     coordinator.drain_actions()
     coordinator._scans[first["scan_id"]].created_at -= scanner_server.SCAN_CACHE_TTL_SECONDS + 1
 
-    second = coordinator.process_observation(ScanObservation(ocr_text="first label"))
+    second = coordinator.process_observation(first_observation)
     assert second["scan_id"] != first["scan_id"]
     for index in range(scanner_server.MAX_STORED_SCANS + 25):
-        coordinator.process_observation(ScanObservation(ocr_text=f"unique label {index}"))
+        coordinator.process_observation(ScanObservation(barcodes=(f"TRACKING{index:010d}",)))
     coordinator.status()
     assert len(coordinator._scans) <= scanner_server.MAX_STORED_SCANS
 
@@ -478,4 +458,20 @@ def test_background_server_starts_and_stops(entries):
     finally:
         server.stop()
         server.stop()
+    assert not server.running
+
+
+def test_background_server_reports_bind_exit_as_oserror(entries, monkeypatch):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    server = ScannerServer(coordinator)
+    monkeypatch.setattr(
+        scanner_server,
+        "make_server",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit(1)),
+    )
+
+    with pytest.raises(OSError, match="local network port"):
+        server.start()
+
     assert not server.running

@@ -237,6 +237,7 @@ class AuditDatabase:
             self.conn.execute("DELETE FROM double_logged WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM scanner_alerts WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM scanner_events WHERE pdf_hash = ?", (pdf_hash,))
+            self.conn.execute("DELETE FROM scanner_feedback WHERE pdf_hash = ?", (pdf_hash,))
 
     def load_package_errors(self, pdf_hash: str) -> list[PackageError]:
         rows = self.conn.execute(

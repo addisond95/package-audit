@@ -100,12 +100,18 @@ def test_clear_all_for_pdf_removes_everything(db):
     db.set_state("hash-a", "item-1", True)
     db.replace_package_errors("hash-a", [PackageError("1701S", "BIN", "USPS", "6651", "note")])
     db.replace_double_logged("hash-a", [DoubleLoggedPackage("0201S", "BIN", "AMZ", "5561")])
+    db.record_scanner_feedback("hash-a", "scan-key", "accepted")
+    db.record_scanner_feedback("hash-b", "other-key", "accepted")
 
     db.clear_all_for_pdf("hash-a")
 
     assert db.load_state("hash-a") == {}
     assert db.load_package_errors("hash-a") == []
     assert db.load_double_logged("hash-a") == []
+    remaining_feedback_hashes = {
+        row[0] for row in db.conn.execute("SELECT pdf_hash FROM scanner_feedback").fetchall()
+    }
+    assert remaining_feedback_hashes == {"hash-b"}
 
 
 def test_legacy_database_migrates_tracking_columns(tmp_path):

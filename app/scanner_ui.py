@@ -48,10 +48,7 @@ class ScannerPairingDialog(QDialog):
         title.setObjectName("scannerTitle")
         layout.addWidget(title)
 
-        status = QLabel(
-            f"Barcode/QR: {'Ready' if capabilities.barcode else 'Unavailable'}   "
-            f"OCR: {capabilities.ocr_engine if capabilities.ocr else 'Unavailable'}"
-        )
+        status = QLabel(f"Tracking barcode scanner: {'Ready' if capabilities.barcode else 'Unavailable'}")
         status.setObjectName("scannerStatus")
         layout.addWidget(status)
 
