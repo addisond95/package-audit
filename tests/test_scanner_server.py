@@ -54,7 +54,7 @@ def test_exact_scan_waits_for_confirmation_and_repeats_idempotently(entries):
 
     assert first["status"] == "confirm"
     assert first["unit"] == "1701S"
-    assert first["candidates"][0]["resident"] == "Mathiesen"
+    assert "resident" not in first["candidates"][0]
     assert len(actions) == 1 and actions[0].kind == "event"
     assert repeated["scan_id"] == first["scan_id"]
     assert repeated["repeated"] is True

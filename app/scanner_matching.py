@@ -137,7 +137,6 @@ class ScanObservation:
 class AuditMatchRecord:
     item_id: str
     unit: str
-    resident: str
     trackings: tuple[str, ...]
     last4: str
     audited: bool
@@ -147,7 +146,6 @@ class AuditMatchRecord:
         return cls(
             item_id=entry.item_id,
             unit=normalize_unit(entry.unit),
-            resident=entry.resident,
             trackings=entry_tracking_values(entry.package),
             last4=entry.last4,
             audited=entry.audited,
@@ -158,7 +156,6 @@ class AuditMatchRecord:
 class MatchCandidate:
     item_id: str
     unit: str
-    resident: str
     last4: str
     tracking: str
     confidence: float = 1.0
@@ -168,7 +165,6 @@ class MatchCandidate:
         return {
             "item_id": self.item_id,
             "unit": self.unit,
-            "resident": self.resident,
             "last4": self.last4,
             "tracking": self.tracking,
             "confidence": self.confidence,
@@ -219,7 +215,6 @@ class PackageMatcher:
         return MatchCandidate(
             item_id=record.item_id,
             unit=record.unit,
-            resident=record.resident,
             last4=tracking[-4:] if tracking else record.last4,
             tracking=tracking,
             audited=record.audited,

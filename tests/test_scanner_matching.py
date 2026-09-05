@@ -55,7 +55,7 @@ def test_unique_exact_barcode_requires_unit_confirmation():
     assert decision.related_item_ids == ("one",)
     assert decision.unit == "1701S"
     assert decision.tracking == "1Z999AA10123456784"
-    assert decision.candidates[0].resident == "Jane Mathiesen"
+    assert "resident" not in decision.candidates[0].to_dict()
     assert decision.confidence == 1.0
 
 
