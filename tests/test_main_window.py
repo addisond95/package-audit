@@ -48,6 +48,45 @@ def _entry(item_id: str, unit: str, resident: str) -> AuditEntry:
     )
 
 
+def test_bluetooth_confirmation_is_saved_before_ack_and_reconnect_is_idempotent(window):
+    import json
+
+    from app.bluetooth_protocol import ScannerBluetoothSession, SecureChannel, compact, decode64, encode64
+
+    window.entries = [_entry("one", "0205S", "Private Resident")]
+    window.entries[0].package = "UPS - #1 - 1Z999AA10123456784"
+    window.scanner_coordinator.configure(window.pdf_hash, window.entries)
+    session = ScannerBluetoothSession(
+        window.scanner_coordinator, window._process_scanner_actions, window._bluetooth_save_verified
+    )
+
+    def connect(nonce):
+        session.disconnect()
+        welcome = json.loads(session.receive(compact({"hello": encode64(nonce)})))
+        return SecureChannel(session.secret, nonce, decode64(welcome["welcome"]), server=False)
+
+    def send(client, request):
+        return client.open(json.loads(session.receive(compact(client.seal(request)))))
+
+    client = connect(b"a" * 32)
+    scan = send(
+        client, {"id": "scan", "op": "scan", "barcodes": ["1Z999AA10123456784"], "formats": ["CODE_128"]}
+    )
+    assert scan["result"]["status"] == "confirm"
+    assert window.db.load_state(window.pdf_hash) == {}
+    request = {"id": "confirm", "op": "confirm", "scan_id": scan["result"]["scan_id"], "item_id": "one"}
+    acknowledged = send(client, request)
+    assert acknowledged["result"]["saved"] is True
+    assert window.db.load_state(window.pdf_hash) == {"one": True}
+    assert window.db.load_scanner_events(window.pdf_hash)[0].status == "matched"
+    client = connect(b"b" * 32)
+    assert send(client, request) == acknowledged
+    assert len(window.db.load_scanner_events(window.pdf_hash)) == 1
+    undone = send(client, {"id": "undo", "op": "undo", "scan_id": scan["result"]["scan_id"]})
+    assert undone["result"]["saved"] is True
+    assert window.db.load_state(window.pdf_hash) == {"one": False}
+
+
 def test_sorted_row_toggle_updates_the_displayed_entry_and_database(window):
     window.entries = [
         _entry("low", "0205S", "Low Resident"),

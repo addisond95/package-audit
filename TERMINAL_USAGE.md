@@ -16,11 +16,13 @@ command -v uv || brew install uv
 # Install the Python environment exactly from uv.lock.
 uv sync --locked
 
-# Optional: enables Remote Phone Scanner across public Wi-Fi and VPNs.
-brew install cloudflared
+# Build the Mac receiver for the native offline Android scanner.
+bash scripts/build_bluetooth.sh
 ```
 
 The first `uv sync` can take a few minutes. Future launches reuse the environment.
+The receiver build needs Apple's Command Line Tools (`xcode-select --install` if missing).
+The Android installation and offline acceptance test are in [BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md).
 
 ## Launch the app
 
@@ -51,7 +53,21 @@ saved automatically in `~/.package_audit/audit_state.sqlite3`.
 
 The original PDF is never overwritten by a highlighted-PDF export.
 
-## Connect a phone locally
+## Connect your Samsung offline over Bluetooth
+
+1. Install the native **Package Audit Scanner** APK once, following [BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md).
+2. Turn on Bluetooth on both devices. Internet, Wi-Fi, hotspot, and Cloudflare are not needed.
+3. Open an audit PDF on the Mac and click **Bluetooth Phone Scanner**. Allow Bluetooth permission if prompted.
+4. In the Android app, tap **Pair with Mac** and scan that window's QR code. Do not use the Samsung camera app
+   or the macOS Bluetooth pairing screen; pairing happens inside Package Audit.
+5. Once connected, tap **Scan packages** and point at one tracking barcode. Check the displayed unit and tap
+   **Confirm unit**. Wait for **Saved on Mac**; scanning resumes automatically for the next package.
+6. Keep the Mac awake and nearby. To prevent idle sleep for this run, launch with
+   `caffeinate -i uv run package-audit`. Keep the phone scanner in the foreground.
+
+Stop the scanner on the Mac when finished. Opening a different audit requires a new pairing QR.
+
+## Optional: connect a phone browser locally
 
 1. Connect the Mac and phone to the same trusted, non-guest Wi-Fi network.
 2. Open an audit PDF in the desktop app.
@@ -74,7 +90,7 @@ The pairing code accepts new phones for 15 minutes. A phone that is already pair
 scanner stops or a different audit is loaded. Tracking values and fallback camera images are processed in memory
 on the Mac and are not saved.
 
-## Connect a phone on public Wi-Fi or through VPNs
+## Optional: connect a phone browser on public Wi-Fi or through VPNs
 
 Install `cloudflared` once if you skipped it during setup:
 
@@ -112,8 +128,8 @@ If the phone cannot open the Local scanner page:
 6. Stop and restart the phone scanner after changing Wi-Fi, after the pairing code expires, or if the Mac wakes
    on a different network. Then scan the new QR code.
 
-If either VPN must remain enabled or the Wi-Fi is public/guest Wi-Fi, use **Remote Phone Scanner** instead. It
-does not depend on local-device routing or inbound firewall access.
+For the native Android app, use **Bluetooth Phone Scanner** to avoid network routing entirely. If using a
+browser, **Remote Phone Scanner** is the optional internet-based alternative.
 
 If Remote mode does not start:
 
@@ -165,6 +181,7 @@ network permission.
 
 ```bash
 cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
+bash scripts/build_bluetooth.sh
 uv run pyinstaller package-audit.spec --clean -y
 ```
 

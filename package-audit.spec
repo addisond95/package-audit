@@ -17,7 +17,7 @@ ROOT = Path(SPECPATH)  # noqa: F821 — injected by PyInstaller
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=[(str(ROOT / "native/build/PackageAuditBluetooth"), "native/build")],
     datas=[],
     hiddenimports=[
         # PySide6 platform plugin required for macOS .app bundles.
@@ -82,9 +82,10 @@ app = BUNDLE(  # noqa: F821
     bundle_identifier="com.packageaudit.app",
     info_plist={
         "CFBundleDisplayName": "Package Audit",
-        "CFBundleShortVersionString": "0.8.0",
-        "CFBundleVersion": "0.8.0",
+        "CFBundleShortVersionString": "0.9.0",
+        "CFBundleVersion": "0.9.0",
         "NSHighResolutionCapable": True,
+        "NSBluetoothAlwaysUsageDescription": "Connect to your offline Android package scanner over Bluetooth.",
         "NSRequiresAquaSystemAppearance": False,
     },
 )

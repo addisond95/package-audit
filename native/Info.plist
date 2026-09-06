@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.packageaudit.bluetooth</string>
+<key>CFBundleName</key><string>Package Audit Bluetooth</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>Connect directly to your Android package scanner without internet or Wi-Fi.</string>
+</dict></plist>

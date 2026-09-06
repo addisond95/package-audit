@@ -39,7 +39,18 @@ transcription work by capturing audit observations directly as structured data.
 - Bulk *Mark All Visible* / *Unmark All Visible* (respect the active search/filter)
 - Progress is saved automatically and resumes when the same PDF is reopened
 
-**Phone scanner (local or remote, both free)**
+**Offline Android scanner (Mac + Bluetooth)**
+
+- Native Android app: live tracking-barcode scanning, no browser or Cloudflare
+- Direct Bluetooth connection: no Wi-Fi, hotspot, mobile data, or internet needed during audits
+- Camera decoding runs on the phone; only decoded barcodes and audit results cross the encrypted link
+- Scan the Mac's temporary pairing QR, tap **Scan packages**, check the returned unit, and confirm
+- Automatically resumes scanning after confirmation; supports flashlight, tap-to-focus, and undo
+- The Mac verifies the database save before acknowledging it; pending requests retry across reconnects
+- Android app has no internet permission, photo storage, analytics, or cloud barcode dependencies
+- See [BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md) for installation and the hardware acceptance checklist
+
+**Optional browser scanner (local or remote)**
 - Use **Local Phone Scanner** on trusted same-device Wi-Fi with no internet dependency
 - Use **Remote Phone Scanner** across public/guest networks and VPNs through a temporary Cloudflare HTTPS address
 - Pair a phone browser using a temporary six-digit code or QR code
@@ -124,7 +135,11 @@ uv run package-audit
 Barcode scanning is included in the Python environment and packaged application;
 there is no separate OCR program to install.
 
-Remote scanning needs the free `cloudflared` utility. On macOS, install it once with
+For the offline Android scanner, build the Mac receiver once with
+`bash scripts/build_bluetooth.sh` (requires Apple's Command Line Tools), then follow
+[BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md). Bluetooth mode does not start a web server or tunnel.
+
+Optional remote browser scanning needs the free `cloudflared` utility. On macOS, install it once with
 `brew install cloudflared`. Local scanning does not need it.
 
 For a complete terminal walkthrough, phone-pairing steps, and connection troubleshooting, see
@@ -147,6 +162,7 @@ uv run python main.py --ui-smoke
 ### Build a standalone macOS app
 
 ```bash
+bash scripts/build_bluetooth.sh
 uv run pyinstaller package-audit.spec --clean -y
 # Output: dist/Package Audit.app (double-clickable, no Python required)
 ```
@@ -171,7 +187,7 @@ flowchart LR
 3. **Record** any package errors and double‑logged packages in their tabs.
 4. **Export** the audit report, CSV, or a highlighted PDF.
 
-### Phone scanner workflow
+### Optional browser scanner workflow
 
 1. Open an audit PDF on the desktop.
 2. Click **Local Phone Scanner** when both devices can reach each other on trusted Wi-Fi. Click

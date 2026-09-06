@@ -1,1 +1,4 @@
 include TERMINAL_USAGE.md
+include BLUETOOTH_USAGE.md BLUETOOTH_PROTOCOL.md
+recursive-include native *.swift *.plist
+recursive-include scripts *.sh *.py

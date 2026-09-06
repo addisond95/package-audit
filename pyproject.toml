@@ -1,6 +1,6 @@
 [project]
 name = "package-audit"
-version = "0.8.0"
+version = "0.9.0"
 description = "BuildingLink package audit desktop application"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,7 @@ dependencies = [
     "pymupdf>=1.24",
     "qrcode>=8.0",
     "zxing-cpp>=2.3",
+    "cryptography>=46",
 ]
 
 [project.scripts]

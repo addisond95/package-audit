@@ -13,6 +13,14 @@ wheels/
 # Virtual environments
 .venv
 
+# Android build state and signing keys stay local
+.gradle/
+local.properties
+*.jks
+*.keystore
+.signing/
+*.apk
+
 # macOS
 .DS_Store
 **/.DS_Store

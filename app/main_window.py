@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.audit_report import write_audit_report
+from app.bluetooth_scanner import BluetoothPairingDialog, BluetoothScanner
 from app.constants import (
     APP_DIR,
     APP_NAME,
@@ -114,6 +115,7 @@ class PackageAuditApp(QMainWindow):
         self.scanner_coordinator = ScannerCoordinator()
         self.scanner_server: ScannerServer | None = None
         self.scanner_dialog: ScannerPairingDialog | None = None
+        self.bluetooth_scanner: BluetoothScanner | None = None
         self.scanner_undo: dict[str, dict] = {}
         self.scanner_item_states: dict[str, str] = {}
         self.open_alert_count = 0
@@ -196,6 +198,11 @@ class PackageAuditApp(QMainWindow):
         header = QHBoxLayout()
         header.addLayout(title_box)
         header.addStretch(1)
+        self.bluetooth_button = self._make_button(
+            "Bluetooth Phone Scanner", self.start_bluetooth_scanner, variant="primary"
+        )
+        self.bluetooth_button.setEnabled(sys.platform == "darwin")
+        header.addWidget(self.bluetooth_button)
         header.addWidget(self.open_button)
         return header
 
@@ -446,6 +453,7 @@ class PackageAuditApp(QMainWindow):
             )
             return
 
+        self.stop_phone_scanner()
         self.pdf_path = path
         self.pdf_hash = pdf_digest
         self.entries = entries
@@ -785,6 +793,59 @@ class PackageAuditApp(QMainWindow):
             self.loading_manual_tables = previous
 
     # ---------------------------------------------------------- phone scanner
+    def start_bluetooth_scanner(self) -> None:
+        if not self._require_entries() or not self.pdf_hash:
+            return
+        if self.bluetooth_scanner:
+            self.bluetooth_scanner.dialog.show()
+            self.bluetooth_scanner.dialog.raise_()
+            return
+        self.stop_phone_scanner()
+        self.scanner_coordinator.configure(self.pdf_hash, self.entries)
+        scanner = BluetoothScanner(
+            self.scanner_coordinator, self._process_scanner_actions, self._bluetooth_save_verified, self
+        )
+        scanner.dialog = BluetoothPairingDialog(scanner, self.stop_bluetooth_scanner, self)
+        try:
+            scanner.start()
+        except OSError as exc:
+            scanner.dialog.deleteLater()
+            scanner.deleteLater()
+            QMessageBox.warning(self, "Bluetooth scanner", str(exc))
+            return
+        self.bluetooth_scanner = scanner
+        self.bluetooth_button.setText("Bluetooth Scanner Info")
+        scanner.dialog.show()
+
+    def stop_bluetooth_scanner(self) -> None:
+        scanner = self.bluetooth_scanner
+        self.bluetooth_scanner = None
+        if scanner:
+            scanner.stop()
+            self._process_scanner_actions()
+            self.scanner_coordinator.invalidate_sessions()
+            scanner.dialog.deleteLater()
+            scanner.deleteLater()
+        if hasattr(self, "bluetooth_button"):
+            self.bluetooth_button.setText("Bluetooth Phone Scanner")
+
+    def _bluetooth_save_verified(self, result: dict) -> bool:
+        status = result.get("status")
+        if status == "matched":
+            saved = self.db.load_state(self.pdf_hash)
+            if not result["related_item_ids"] or not all(
+                saved.get(item_id) for item_id in result["related_item_ids"]
+            ):
+                return False
+        if status in {"matched", "not_found", "duplicate", "rejected", "undo_queued"}:
+            expected = "undone" if status == "undo_queued" else status
+            row = self.db.conn.execute(
+                "SELECT status FROM scanner_events WHERE pdf_hash = ? AND scan_id = ?",
+                (self.pdf_hash, result["scan_id"]),
+            ).fetchone()
+            return bool(row and row[0] == expected)
+        return True
+
     def start_phone_scanner(self) -> None:
         self._start_phone_scanner(remote=False)
 
@@ -792,6 +853,7 @@ class PackageAuditApp(QMainWindow):
         self._start_phone_scanner(remote=True)
 
     def _start_phone_scanner(self, *, remote: bool) -> None:
+        self.stop_bluetooth_scanner()
         if not self._require_entries() or not self.pdf_hash:
             return
         self.scanner_coordinator.configure(
@@ -848,6 +910,7 @@ class PackageAuditApp(QMainWindow):
         )
 
     def stop_phone_scanner(self) -> None:
+        self.stop_bluetooth_scanner()
         dialog = self.scanner_dialog
         self.scanner_dialog = None
         if dialog:
@@ -1180,6 +1243,7 @@ class PackageAuditApp(QMainWindow):
         ):
             return
 
+        self.stop_phone_scanner()
         self.db.clear_all_for_pdf(self.pdf_hash)
         for entry in self.entries:
             entry.audited = False
