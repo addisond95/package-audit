@@ -82,8 +82,8 @@ app = BUNDLE(  # noqa: F821
     bundle_identifier="com.packageaudit.app",
     info_plist={
         "CFBundleDisplayName": "Package Audit",
-        "CFBundleShortVersionString": "0.7.0",
-        "CFBundleVersion": "0.7.0",
+        "CFBundleShortVersionString": "0.8.0",
+        "CFBundleVersion": "0.8.0",
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,
     },

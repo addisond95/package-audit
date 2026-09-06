@@ -87,14 +87,15 @@ class ScannerPairingDialog(QDialog):
 
         privacy = QLabel(
             (
-                "Remote mode sends barcode photos through Cloudflare over HTTPS. "
-                "Package Audit processes them on this Mac and does not save them. "
+                "Remote mode sends decoded tracking values or small live camera crops "
+                "through Cloudflare over HTTPS. Package Audit processes them on this Mac "
+                "and does not save them. "
                 "Stopping the scanner closes this temporary public address."
             )
             if server.remote
             else (
                 "Local mode stays on your trusted Wi-Fi. Package Audit processes "
-                "barcode photos on this Mac and does not save them."
+                "tracking values and live camera crops on this Mac and does not save them."
             )
         )
         privacy.setWordWrap(True)

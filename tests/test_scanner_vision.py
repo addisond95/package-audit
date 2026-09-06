@@ -10,7 +10,12 @@ import zxingcpp
 from PIL import Image
 
 import app.scanner_vision as scanner_vision
-from app.scanner_vision import ScanImageError, analyze_image, scanner_capabilities
+from app.scanner_vision import (
+    ScanImageError,
+    analyze_image,
+    observation_from_barcodes,
+    scanner_capabilities,
+)
 
 
 def _qr_image(payload: str = "1Z999AA10123456784") -> bytes:
@@ -53,6 +58,17 @@ def test_scanner_capabilities_report_only_barcode_backend():
     capabilities = scanner_capabilities()
     assert capabilities.barcode is True
     assert capabilities.to_dict() == {"barcode": True}
+
+
+def test_browser_barcodes_are_deduplicated_and_keep_aligned_formats():
+    observation = observation_from_barcodes(
+        ("  1Z999AA10123456784 ", "1Z999AA10123456784", "TBA123456789012"),
+        ("code_128", "qr_code", "data_matrix"),
+    )
+
+    assert observation.barcodes == ("1Z999AA10123456784", "TBA123456789012")
+    assert observation.barcode_formats == ("code_128", "data_matrix")
+    assert observation.carrier == "UPS"
 
 
 @pytest.mark.parametrize("payload", [b"", b"not an image"])

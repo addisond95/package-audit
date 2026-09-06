@@ -60,16 +60,19 @@ The original PDF is never overwritten by a highlighted-PDF export.
    private network.
 5. Scan the QR code in the desktop pairing window with the phone camera. If that does not open, type or copy
    the displayed `http://...` address into the phone browser and enter the six-digit code.
-6. On the phone, tap **Scan package**, frame one tracking barcode, take the picture, and accept the camera
-   preview. The page resizes and sends the image immediately; there is no separate Submit button. Use
-   **Existing photo** only as a fallback.
+6. On the phone, tap **Scan package** once and hold one tracking barcode inside the green live guide. The page
+   reads it automatically; there is no shutter, camera preview, or Submit button. Use **Existing photo** only as
+   a fallback. If the browser blocks live camera access on the local HTTP address, **Scan package** switches to
+   the phone's normal camera-photo screen; use Remote mode for the full HTTPS live-camera workflow.
 7. The phone displays the unit logged for that exact tracking number. Check the unit against the box label,
-   then tap **Confirm unit …** to mark it present. Tap **Wrong barcode — rescan** if the wrong barcode was read.
+   then tap **Confirm unit …** to mark it present. Tap **Wrong barcode — rescan** if the wrong barcode was read,
+   or **Scan next package** to resume the already-open live camera.
 8. A readable tracking number absent from the audit is recorded automatically under **Package Errors** as
    `Not logged`. A duplicate audit tracking number is flagged for investigation. Use **Undo** if needed.
 
 The pairing code accepts new phones for 15 minutes. A phone that is already paired stays connected until the
-scanner stops or a different audit is loaded. Photos are processed in memory on the Mac and are not saved.
+scanner stops or a different audit is loaded. Tracking values and fallback camera images are processed in memory
+on the Mac and are not saved.
 
 ## Connect a phone on public Wi-Fi or through VPNs
 
@@ -93,8 +96,8 @@ Then:
 6. Click **Stop Scanner** when finished. This shuts down the temporary public address immediately.
 
 Remote mode is free and does not require a Cloudflare account. The address changes on every start and is not a
-permanent hosted service. Barcode decoding still happens on the Mac, but the encrypted requests and barcode
-photos pass through Cloudflare on their way there. Package Audit does not save the photos.
+permanent hosted service. The encrypted requests, decoded tracking values, and any fallback live camera crops
+pass through Cloudflare on their way to the Mac. Package Audit does not save them.
 
 ## Phone connection troubleshooting
 

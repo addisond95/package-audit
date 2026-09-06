@@ -58,6 +58,7 @@ def export_smoke() -> None:
 
 def scanner_smoke() -> None:
     import io
+    import re
 
     import qrcode
     import zxingcpp
@@ -74,10 +75,8 @@ def scanner_smoke() -> None:
         raise RuntimeError("ZXing could not decode the generated smoke-test QR code.")
 
     coordinator = ScannerCoordinator()
-    coordinator.configure(
-        "smoke",
-        [AuditEntry("one", 0, "1701S", "Mathiesen", f"UPS - #1 - {payload}", "", "")],
-    )
+    entry = AuditEntry("one", 0, "1701S", "Mathiesen", f"UPS - #1 - {payload}", "", "")
+    coordinator.configure("smoke", [entry])
     image_bytes = io.BytesIO()
     image.save(image_bytes, format="PNG")
     scanned = coordinator.process_image(image_bytes.getvalue())
@@ -88,14 +87,36 @@ def scanner_smoke() -> None:
     if confirmed.get("status") != "matched":
         raise RuntimeError("Phone scanner confirmation did not queue the audit match.")
     coordinator.drain_actions()
+    coordinator.configure("smoke", [entry], reset_scans=True)
     web_app = create_scanner_app(coordinator, "123456", "scanner-smoke-secret")
     web_app.config["TESTING"] = True
     client = web_app.test_client()
     if client.post("/pair", data={"code": "123456"}).status_code != 302:
         raise RuntimeError("Phone scanner pairing smoke test failed.")
     phone_page = client.get("/scanner")
-    if phone_page.status_code != 200 or b"Scan package" not in phone_page.data:
+    if (
+        phone_page.status_code != 200
+        or b"Scan package" not in phone_page.data
+        or b'id="live-video"' not in phone_page.data
+    ):
         raise RuntimeError("Phone scanner interface smoke test failed.")
+    csrf_match = re.search(rb'name="csrf-token" content="([^"]+)"', phone_page.data)
+    if csrf_match is None:
+        raise RuntimeError("Phone scanner CSRF token was not rendered.")
+    csrf = csrf_match.group(1).decode()
+    live_results = []
+    for _frame in range(2):
+        live_results.append(
+            client.post(
+                "/api/live/frame",
+                data={"image": (io.BytesIO(image_bytes.getvalue()), "live-qr.png")},
+                headers={"X-CSRF-Token": csrf},
+            ).get_json()
+        )
+    if live_results[0].get("status") != "searching":
+        raise RuntimeError("Live scanner accepted a barcode before its stability check.")
+    if live_results[1].get("status") != "confirm" or live_results[1].get("unit") != "1701S":
+        raise RuntimeError("Live scanner did not resolve a stable tracking barcode.")
     status = client.get("/api/status").get_json()
     if status.get("packages") != 1 or status.get("remaining") != 1:
         raise RuntimeError("Phone scanner progress smoke test failed.")

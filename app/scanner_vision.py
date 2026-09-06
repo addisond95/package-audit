@@ -88,12 +88,29 @@ def _detect_carrier(barcodes: tuple[str, ...]) -> str:
     return "PKG"
 
 
+def observation_from_barcodes(
+    barcodes: tuple[str, ...],
+    barcode_formats: tuple[str, ...] = (),
+) -> ScanObservation:
+    """Build a normalized observation from browser- or image-decoded barcodes."""
+    values: list[str] = []
+    formats: list[str] = []
+    for index, raw_value in enumerate(barcodes):
+        value = raw_value.strip()
+        if not value or value in values:
+            continue
+        values.append(value)
+        formats.append(barcode_formats[index] if index < len(barcode_formats) else "")
+    normalized_values = tuple(values)
+    return ScanObservation(
+        barcodes=normalized_values,
+        carrier=_detect_carrier(normalized_values),
+        barcode_formats=tuple(formats),
+    )
+
+
 def analyze_image(image_bytes: bytes) -> ScanObservation:
     """Decode tracking barcodes without running slow text OCR."""
     image = _open_image(image_bytes)
     barcodes, formats = _decode_barcodes(image)
-    return ScanObservation(
-        barcodes=barcodes,
-        carrier=_detect_carrier(barcodes),
-        barcode_formats=formats,
-    )
+    return observation_from_barcodes(barcodes, formats)

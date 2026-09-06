@@ -254,6 +254,7 @@ def test_pairing_page_escapes_prefill_and_sets_private_headers(entries):
     assert b"&lt;script&gt;alert(1)&lt;/script&gt;" in response.data
     assert response.headers["Cache-Control"].startswith("no-store")
     assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Permissions-Policy"] == "camera=(self), microphone=()"
     assert "default-src 'self'" in response.headers["Content-Security-Policy"]
 
 
@@ -383,12 +384,117 @@ def test_phone_page_exposes_one_tap_auto_upload_and_confirmation(entries):
     assert b'id="connection"' in scanner.data
     assert b"Scan package" in scanner.data
     assert b"Existing photo" in scanner.data
-    assert b"tracking barcode only" in scanner.data
+    assert b'id="live-video"' in scanner.data
+    assert b"getUserMedia" in scanner.data
+    assert b"BarcodeDetector" in scanner.data
+    assert b"/api/live/frame" in scanner.data
+    assert b"Barcode seen" in scanner.data
     assert b"prepareImage" in scanner.data
     assert b"Confirm unit" in scanner.data
     assert b"requestTimeoutMs" in scanner.data
+    assert b"no picture or Submit step" in scanner.data
     assert b"Take package photo" not in scanner.data
     assert b"maximum-scale" not in scanner.data
+
+
+def test_live_browser_detections_require_two_matching_frames(entries):
+    coordinator, client, csrf = _paired_client(entries)
+    payload = {
+        "barcodes": ["1Z999AA10123456784"],
+        "formats": ["code_128"],
+    }
+
+    first = client.post(
+        "/api/live/trackings",
+        json=payload,
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert coordinator.drain_actions() == []
+    second = client.post(
+        "/api/live/trackings",
+        json=payload,
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert first.status_code == 200
+    assert first.get_json()["status"] == "searching"
+    assert first.get_json()["detected"] is True
+    assert second.status_code == 200
+    assert second.get_json()["status"] == "confirm"
+    assert second.get_json()["unit"] == "1701S"
+    assert coordinator.drain_actions()[0].decision.status == "confirm"
+
+
+def test_live_stability_resets_when_the_detected_barcode_changes(entries):
+    coordinator, client, csrf = _paired_client(entries)
+
+    statuses = []
+    for tracking in (
+        "1Z999AA10123456784",
+        "1Z999AA10123450000",
+        "1Z999AA10123450000",
+    ):
+        response = client.post(
+            "/api/live/trackings",
+            json={"barcodes": [tracking], "formats": ["code_128"]},
+            headers={"X-CSRF-Token": csrf},
+        )
+        statuses.append(response.get_json()["status"])
+
+    assert statuses == ["searching", "searching", "confirm"]
+    action = coordinator.drain_actions()
+    assert len(action) == 1
+    assert action[0].decision.unit == "1802S"
+
+
+def test_live_frame_fallback_ignores_empty_frames_then_matches(entries, monkeypatch):
+    coordinator, client, csrf = _paired_client(entries)
+    observations = iter(
+        [
+            ScanObservation(),
+            ScanObservation(barcodes=("1Z999AA10123456784",)),
+            ScanObservation(barcodes=("1Z999AA10123456784",)),
+        ]
+    )
+    monkeypatch.setattr(scanner_server, "analyze_image", lambda _image: next(observations))
+
+    responses = [
+        client.post(
+            "/api/live/frame",
+            data={"image": (io.BytesIO(b"frame"), "frame.jpg")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        for _ in range(3)
+    ]
+
+    assert responses[0].get_json() == {
+        "detected": False,
+        "message": "Point the guide at one tracking barcode.",
+        "status": "searching",
+    }
+    assert responses[1].get_json()["status"] == "searching"
+    assert responses[2].get_json()["status"] == "confirm"
+    assert responses[2].get_json()["unit"] == "1701S"
+    assert len(coordinator.drain_actions()) == 1
+
+
+def test_live_tracking_endpoint_validates_payload_and_csrf(entries):
+    _coordinator, client, csrf = _paired_client(entries)
+
+    assert client.post("/api/live/trackings", json={"barcodes": ["TRACKING123"]}).status_code == 403
+    invalid = client.post(
+        "/api/live/trackings",
+        json={"barcodes": []},
+        headers={"X-CSRF-Token": csrf},
+    )
+    too_long = client.post(
+        "/api/live/trackings",
+        json={"barcodes": ["X" * (scanner_server.MAX_LIVE_BARCODE_LENGTH + 1)]},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert invalid.status_code == 400
+    assert too_long.status_code == 400
 
 
 def test_http_not_found_rejects_unusable_scan(entries, monkeypatch):

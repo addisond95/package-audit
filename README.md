@@ -43,10 +43,13 @@ transcription work by capturing audit observations directly as structured data.
 - Use **Local Phone Scanner** on trusted same-device Wi-Fi with no internet dependency
 - Use **Remote Phone Scanner** across public/guest networks and VPNs through a temporary Cloudflare HTTPS address
 - Pair a phone browser using a temporary six-digit code or QR code
-- Capture one tracking barcode at a time; no resident-name or unit OCR is performed
+- Scan one tracking barcode at a time; no resident-name or unit OCR is performed
 - See live audited/remaining totals, alert counts, and desktop connection state on the phone
-- Tap **Scan package**, take the picture, and the phone automatically resizes and submits it
-- Decode barcodes locally on the desktop with ZXing; no slow OCR or cloud recognition service is involved
+- Tap **Scan package** once and hold the tracking barcode inside the live guide—there is no shutter,
+  preview, or Submit step
+- Use the phone's live barcode detector when available, with automatic small-frame fallback to ZXing on the
+  desktop; no slow OCR or cloud recognition service is involved
+- Require two consistent detections before accepting a live barcode
 - Require an exact full-tracking-number match—never fuzzy matching, names, units, or last-four alone
 - Show the audit's logged unit on the phone and mark it present only after explicit confirmation
 - Log reliable tracking barcodes absent from the audit as `Not logged`
@@ -176,11 +179,12 @@ flowchart LR
    different networks. Remote mode only requires both devices to have internet access.
 3. Scan the displayed QR code, or enter the shown URL and pairing code.
    The desktop dialog confirms when the phone is connected and can copy the address when manual entry is easier.
-4. Tap **Scan package**, frame one tracking barcode, take the picture, and accept the phone's camera preview.
-   The image is resized and submitted automatically—there is no app-level Submit step. **Existing photo** is a
-   fallback for an image already in the photo library.
+4. Tap **Scan package** once and hold one tracking barcode inside the green live guide. The scanner reads it
+   automatically—there is no shutter, camera preview, or Submit step. **Existing photo** remains available as a
+   fallback. Browsers that do not permit live camera access fall back to the phone's normal camera-photo screen.
 5. The phone shows the exact unit recorded for that tracking number. Check that unit against the label, then tap
-   **Confirm unit …**. Only that confirmation marks the desktop audit row present.
+   **Confirm unit …**. Only that confirmation marks the desktop audit row present. Tap **Scan next package** to
+   resume the already-open camera without another photo workflow.
 6. A reliable tracking barcode absent from the audit is logged in Package Errors as `Not logged`. Duplicate
    tracking produces a Double Logged row and orange alert. An unreadable or multi-label image asks for a rescan.
 
@@ -188,13 +192,13 @@ Both modes require a temporary pairing code and use a signed browser session plu
 to the private network and needs no internet service. Remote mode binds the scanner itself to Mac loopback only,
 then `cloudflared` makes an outbound connection to a random temporary `trycloudflare.com` HTTPS address. It is
 free, needs no Cloudflare account, and closes when **Stop Scanner** is clicked. The app checks that the address
-is reachable before displaying it and retries once if Cloudflare issues a bad temporary hostname. Photos are
-decoded in memory on the desktop and are not saved by Package Audit.
+is reachable before displaying it and retries once if Cloudflare issues a bad temporary hostname. Live detections
+and fallback camera crops are handled in memory and are not saved by Package Audit.
 
-Remote-mode traffic—including barcode photos—passes through Cloudflare because Cloudflare terminates the HTTPS
-connection before forwarding it to this Mac. Use Local mode when keeping all traffic on a trusted LAN is more
-important. Quick Tunnels are intended for temporary use and have no uptime guarantee; they are not a permanent
-hosted service.
+Remote-mode traffic—including decoded tracking values and fallback camera crops—passes through Cloudflare because
+Cloudflare terminates the HTTPS connection before forwarding it to this Mac. Use Local mode when keeping all
+traffic on a trusted LAN is more important. Quick Tunnels are intended for temporary use and have no uptime
+guarantee; they are not a permanent hosted service.
 
 If Local mode cannot connect because of VPN routing or Wi-Fi client isolation, stop it and use Remote mode while
 leaving both VPNs enabled. If Remote mode cannot start, run `cloudflared --version`, verify the Mac has internet
@@ -288,9 +292,13 @@ restores checked rows and manual entries automatically.
 
 ## Release status
 
-**v0.6 (current)** — fast tracking-only phone scanning, exact audit lookup,
-explicit unit confirmation, automatic image submission, and keyboard-first desktop
-auditing, while preserving Not logged/duplicate records, alerts, undo, and exports.
+**v0.8 (current)** — one-tap live phone camera scanning with automatic browser/desktop decoding fallback and
+two-frame stability checks. The phone shows only the exact audit unit before explicit confirmation.
+
+**v0.7** — secure remote scanning across public networks and VPNs through an ephemeral Cloudflare HTTPS tunnel.
+
+**v0.6** — fast tracking-only phone scanning, exact audit lookup, explicit unit confirmation, automatic image
+submission, and keyboard-first desktop auditing.
 
 **v0.5** — local phone QR/barcode/OCR scanner, confidence review, automatic
 Not logged and duplicate records, alerts, undo, and adaptive matching.
