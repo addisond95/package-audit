@@ -1,328 +1,286 @@
 # BuildingLink Package Audit
 
-A desktop application that turns BuildingLink Event Log PDF exports into a fast,
-structured package‑auditing workflow for residential concierge and property
-management teams.
+Package Audit turns a BuildingLink Event Log PDF into a fast, local package-auditing workflow. It replaces
+paper markups and retyped discrepancy notes with a searchable desktop audit, automatic local persistence,
+structured exception records, and a direct offline Android scanner.
 
-Instead of marking up printed audit sheets and writing summaries by hand,
-auditors open an export, verify packages with a single click, record exceptions
-in spreadsheet‑style tables, and generate a standardized audit report
-automatically.
+The primary scanner workflow is a Samsung/Android phone connected directly to a Mac over Bluetooth Low Energy:
+no browser, Wi-Fi, hotspot, internet connection, Cloudflare tunnel, account, or subscription is needed during
+an audit.
 
----
+> Status: version 0.9.0 is a locally installed Mac + Android solution that has been tested end-to-end on a
+> Mac and Samsung Galaxy S24 Ultra. It is not yet a notarized macOS release, Play Store release, or formally
+> independently security-audited product.
 
-## Why
+## What it does today
 
-Package audits were traditionally done on paper:
+### Desktop audit
 
-- Print the BuildingLink package report
-- Mark verified packages by hand
-- Write discrepancies and double‑logged packages on the side
-- Re‑type everything into a summary
+- Opens BuildingLink Event Log PDFs and extracts unit, resident, package, tower, timestamp, and tracking data.
+- Lets you mark packages present with a mouse, keyboard, search, filters, and bulk actions.
+- Supports keyboard-first auditing: type a unit, use Up/Down, press Enter to mark a result, then type the next
+  unit without reselecting the search field.
+- Saves audit progress locally in SQLite and restores it when the same PDF is reopened.
+- Keeps package errors and double-logged packages in spreadsheet-style editable tables.
+- Exports a text audit report, spreadsheet-safe CSV, and a highlighted copy of the source PDF.
 
-That process is slow, repetitive, and easy to get wrong. This tool removes the
-transcription work by capturing audit observations directly as structured data.
+### Offline Android Bluetooth scanner
 
----
+- Runs as a native Android app, not a web page.
+- Uses the phone camera for live barcode recognition; photos and video frames remain in phone memory.
+- Sends only decoded barcode values and audit responses through an encrypted Bluetooth connection to the Mac.
+- Uses one-time QR pairing for each scanner/audit session; normal macOS Bluetooth-device pairing is not used.
+- Matches only an exact, full tracking number. It does not OCR resident names, printed labels, or unit numbers,
+  and never marks an audit row from a last-four match alone.
+- Shows the unit recorded by the audit on the phone. You compare it with the box label and explicitly confirm
+  before the Mac marks the row present.
+- Returns to live scanning automatically after a saved confirmation. Flashlight, tap-to-focus, wrong-barcode
+  rescan, and undo are available on the phone.
+- Flags reliable unknown tracking numbers as `Not logged` and detects duplicate tracking values for review.
+- Confirms the SQLite save on the Mac before it tells the phone that a package is saved. Reconnect retries use
+  idempotent request IDs so an interrupted confirmation is not applied twice.
 
-## Features
+### Privacy and connection model
 
-**PDF processing**
-- Parse BuildingLink Event Log PDFs
-- Extract unit, resident, package, tower, timestamp, and tracking last‑four
+- The Android scanner declares Camera, Nearby Devices/Bluetooth, and vibration permissions only. It has no
+  Internet, storage, location, microphone, analytics, or cloud barcode-service permission.
+- The Bluetooth protocol uses a fresh QR-provisioned key per scanner session, authenticated encryption, ordered
+  messages, replay protection, and a bounded reconnect strategy. See [BLUETOOTH_PROTOCOL.md](BLUETOOTH_PROTOCOL.md).
+- Audit state remains in `~/.package_audit/audit_state.sqlite3` on the Mac. Use macOS account protection and
+  full-disk encryption for production records; SQLite data is not encrypted by this application.
+- Optional legacy browser scanners remain available for local Wi-Fi or temporary Cloudflare access, but they are
+  not required for the native Android Bluetooth workflow. Remote browser mode sends traffic through Cloudflare.
 
-**Audit workflow**
-- One‑click verification with row highlighting
-- Live search across unit, resident, package, tracking, and tower
-- Keyboard-first unit lookup: type, use Up/Down, and press Enter to mark a row; focus returns to search
-- "Unchecked only" filter
-- Bulk *Mark All Visible* / *Unmark All Visible* (respect the active search/filter)
-- Progress is saved automatically and resumes when the same PDF is reopened
+## Requirements
 
-**Offline Android scanner (Mac + Bluetooth)**
+For the recommended offline workflow:
 
-- Native Android app: live tracking-barcode scanning, no browser or Cloudflare
-- Direct Bluetooth connection: no Wi-Fi, hotspot, mobile data, or internet needed during audits
-- Camera decoding runs on the phone; only decoded barcodes and audit results cross the encrypted link
-- Scan the Mac's temporary pairing QR, tap **Scan packages**, check the returned unit, and confirm
-- Automatically resumes scanning after confirmation; supports flashlight, tap-to-focus, and undo
-- The Mac verifies the database save before acknowledging it; pending requests retry across reconnects
-- Android app has no internet permission, photo storage, analytics, or cloud barcode dependencies
-- See [BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md) for installation and the hardware acceptance checklist
+- macOS with Bluetooth and Apple Command Line Tools
+- Python 3.10+ and [uv](https://docs.astral.sh/uv/)
+- Android 12+ phone with Bluetooth LE and a camera (the current tested device is Samsung Galaxy S24 Ultra)
+- The locally built `Package Audit Scanner` Android APK installed once
 
-**Optional browser scanner (local or remote)**
-- Use **Local Phone Scanner** on trusted same-device Wi-Fi with no internet dependency
-- Use **Remote Phone Scanner** across public/guest networks and VPNs through a temporary Cloudflare HTTPS address
-- Pair a phone browser using a temporary six-digit code or QR code
-- Scan one tracking barcode at a time; no resident-name or unit OCR is performed
-- See live audited/remaining totals, alert counts, and desktop connection state on the phone
-- Tap **Scan package** once and hold the tracking barcode inside the live guide—there is no shutter,
-  preview, or Submit step
-- Use the phone's live barcode detector when available, with automatic small-frame fallback to ZXing on the
-  desktop; no slow OCR or cloud recognition service is involved
-- Require two consistent detections before accepting a live barcode
-- Require an exact full-tracking-number match—never fuzzy matching, names, units, or last-four alone
-- Show the audit's logged unit on the phone and mark it present only after explicit confirmation
-- Log reliable tracking barcodes absent from the audit as `Not logged`
-- Detect duplicate tracking across units, create alerts, preserve full tracking values, and support undo
+Internet is needed only to install development dependencies or build tools. It is not needed while auditing over
+Bluetooth. USB is only used to install/update the Android app; unplug it after installation.
 
-**Manual report sections**
-- *Package Errors* — `Unit | Location | Carrier | Tracking | Last 4 | Note`
-- *Double Logged Packages* — `Unit | Location | Carrier | Tracking | Last 4`
-- Spreadsheet‑style editing with dropdowns, tab navigation, and automatic blank rows
+## Quick start: run an audit tonight
 
-**Exports**
+First-time setup on the Mac:
+
+```bash
+cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
+
+# Install uv if necessary.
+command -v uv || brew install uv
+
+# Create the locked Python environment and build the macOS Bluetooth receiver.
+uv sync --locked
+bash scripts/build_bluetooth.sh
+```
+
+Launch Package Audit and prevent the Mac from idling asleep during the audit:
+
+```bash
+cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
+caffeinate -i uv run package-audit
+```
+
+Then:
+
+1. Open the correct BuildingLink Event Log PDF.
+2. Click **Bluetooth Phone Scanner** on the Mac.
+3. Open **Package Audit Scanner** on Android, tap **Pair with Mac**, and scan the pairing QR in the Mac dialog.
+4. Wait for **Connected securely • Bluetooth only**.
+5. Tap **Scan packages** once. Fill the camera view with one tracking barcode, including its white margins.
+6. Check the returned unit against the label and tap **Confirm unit …**.
+7. Wait for **Saved on Mac**. The phone resumes scanning for the next package automatically.
+8. Click **Stop Bluetooth Scanner** on the Mac when finished, then export any needed report.
+
+Keep the Mac awake, the phone app in the foreground, and both devices within tested Bluetooth range. VPN,
+public Wi-Fi, mobile data, and hotspot configuration do not affect Bluetooth scanning.
+
+## Install the Android scanner once
+
+The signed installer produced by this workspace is:
+
+```text
+dist/PackageAuditScanner-0.9.0.apk
+```
+
+Enable **USB debugging** in Android Developer options, connect an unlocked phone with a USB data cable, approve
+the Mac's debugging key, and run:
+
+```bash
+cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
+adb devices -l
+adb install -r dist/PackageAuditScanner-0.9.0.apk
+```
+
+The device must display `device` in the first command. Choose **Transferring files / Android Auto** for the USB
+connection, not tethering or MIDI. After installation, allow **Camera** and **Nearby devices** in the scanner,
+unplug the cable, and disable USB debugging again if you do not otherwise need it.
+
+For detailed installation, recovery, range, privacy, and real-hardware acceptance instructions, read
+[BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md).
+
+## Core workflow details
+
+### Exact matching and exceptions
+
+The scanner deliberately prioritizes correctness over guessing:
+
+- A full tracking number must exactly match an audit record before the app offers a unit to confirm.
+- If the audit has only a shortened tracking value, the app does not infer a full match; use desktop search/manual
+  verification instead.
+- A readable tracking number absent from the audit creates a `Not logged` package-error record.
+- A tracking number logged under more than one audit item is treated as a duplicate for review.
+- Damaged, poorly lit, unsupported, or multi-label barcodes may need a rescan or manual audit entry. A scan never
+  silently marks an arbitrary row.
+
+### Keyboard-only desktop auditing
+
+| Input | Result |
+| --- | --- |
+| Type in search | Filters by unit, resident, tracking, package, or tower |
+| Down / Up from search | Selects the first / last visible result |
+| Down / Up in audit table | Moves between visible rows |
+| Enter | Marks or unmarks the selected row, then returns focus to search |
+| Enter with one visible result | Marks or unmarks it directly from search |
+| Ctrl+A | Marks all visible rows |
+| Ctrl+Shift+A | Unmarks all visible rows |
+
+### Audit data and exports
+
+Audit state is keyed to the content hash of the source PDF, so reopening the same export restores its checked
+rows and manual sections. **Clear Current Audit** removes checked state, scanner events, alerts, and exceptions
+for the current PDF. **Clear Manual Sections** removes only package-error and duplicate rows.
+
+Available exports:
+
 - Audit report (`.txt`)
-- Spreadsheet-safe raw data (`.csv`)
+- Spreadsheet-safe raw audit data (`.csv`)
 - Highlighted copy of the source PDF
 
----
+Source PDFs, generated reports, APKs, build products, and signing material are ignored by Git to reduce the
+risk of committing resident or credential data.
 
-## Tech stack
+## Optional browser scanner modes
 
-- **Python** 3.10+
-- **PySide6** — desktop UI
-- **PyMuPDF** — PDF parsing and highlighting
-- **SQLite** — local audit‑state persistence (standard library)
+These pre-existing modes remain available but are not the recommended solution for the offline workflow:
 
----
+- **Local Phone Scanner**: phone browser and Mac must reach one another on a trusted non-guest Wi-Fi network.
+- **Remote Phone Scanner**: uses free, temporary Cloudflare Quick Tunnel access when devices are on separate
+  networks or using VPNs. It requires internet and Cloudflare receives the proxied traffic.
 
-## Project structure
-
-```
-package-audit/
-├── main.py                 # Entry point
-├── pyproject.toml          # Metadata, dependencies, tooling config
-├── app/
-│   ├── constants.py        # Locations, carriers, paths, defaults
-│   ├── models.py           # Dataclasses + value normalization
-│   ├── parser.py           # BuildingLink PDF parsing
-│   ├── database.py         # SQLite persistence layer
-│   ├── diagnostics.py      # Private rotating crash diagnostics
-│   ├── audit_report.py     # Plain-text report generation
-│   ├── export_pdf.py       # Highlighted PDF export
-│   ├── export_utils.py     # Safe CSV cells + atomic private exports
-│   ├── delegates.py        # Table cell editors (dropdowns)
-│   ├── scanner_matching.py # Exact tracking-number lookup
-│   ├── scanner_server.py   # Paired local/remote phone web app
-│   ├── scanner_tunnel.py   # Optional temporary Cloudflare HTTPS tunnel
-│   ├── scanner_vision.py   # Fast local barcode decoding
-│   ├── scanner_ui.py       # Desktop pairing dialog
-│   ├── theme.py            # Qt stylesheet
-│   └── main_window.py      # Main window and application wiring
-├── tests/                  # Regression and smoke-test suite
-├── data/                   # Put source PDFs here (local)
-└── exports/                # Generated reports (local)
-```
-
----
-
-## Getting started
-
-This project uses [uv](https://docs.astral.sh/uv/).
+Install Cloudflare's utility only if you specifically need remote browser scanning:
 
 ```bash
-# Install dependencies into a virtual environment
-uv sync
-
-# Launch the application
-uv run python main.py
-
-# Or use the installed console entry point
-uv run package-audit
+brew install cloudflared
 ```
 
-Barcode scanning is included in the Python environment and packaged application;
-there is no separate OCR program to install.
+See [TERMINAL_USAGE.md](TERMINAL_USAGE.md) for full browser-mode instructions and troubleshooting.
 
-For the offline Android scanner, build the Mac receiver once with
-`bash scripts/build_bluetooth.sh` (requires Apple's Command Line Tools), then follow
-[BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md). Bluetooth mode does not start a web server or tunnel.
+## Test before a production audit
 
-Optional remote browser scanning needs the free `cloudflared` utility. On macOS, install it once with
-`brew install cloudflared`. Local scanning does not need it.
-
-For a complete terminal walkthrough, phone-pairing steps, and connection troubleshooting, see
-[TERMINAL_USAGE.md](TERMINAL_USAGE.md).
-
-### Development
+Run the disposable end-to-end test on the actual Mac and phone after rebuilding or changing Bluetooth code:
 
 ```bash
-uv run pytest        # run the test suite
-uv run ruff check .  # lint
+cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
+uv run python scripts/bluetooth_hardware_test.py
+```
+
+It creates a temporary one-package audit, shows a pairing QR and a test tracking QR, and reports PASS only after
+the phone scans, receives the expected unit, confirms it, and the Mac has saved exactly one audit event. The
+temporary database is removed when the test closes. It does not touch production audit data.
+
+For a real acceptance test, also try representative carrier labels, poor lighting, known unknown/duplicate
+labels, background/reconnect behavior, and the actual package-room range. The hardware checklist is in
+[BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md).
+
+## Development and builds
+
+Run local checks:
+
+```bash
+cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
+
+uv run pytest -q
+uv run ruff check .
 uv run ruff format --check .
-uv run bandit -q -r app main.py
+uv run bandit -q -r app main.py scripts
 uv run pip-audit
-uv run python main.py --export-smoke
 uv run python main.py --scanner-smoke
-uv run python main.py --remote-scanner-smoke # optional: needs cloudflared + internet
+uv run python main.py --export-smoke
 uv run python main.py --ui-smoke
 ```
 
-### Build a standalone macOS app
+Build the signed Android APK from source (JDK 17, Android SDK platform 35, and Build Tools 35.0.0 required):
+
+```bash
+uv run python scripts/build_android.py
+```
+
+The build creates or reuses a private local update key under `.signing/` and writes the APK to `dist/`. Back up
+that key securely; future updates require it. Never commit or share it.
+
+Build the local macOS app bundle:
 
 ```bash
 bash scripts/build_bluetooth.sh
 uv run pyinstaller package-audit.spec --clean -y
-# Output: dist/Package Audit.app (double-clickable, no Python required)
 ```
 
----
+The result is `dist/Package Audit.app`. It is suitable for local use but is not currently Developer ID signed or
+notarized for distribution to other Macs.
 
-## Workflow
-
-```mermaid
-flowchart LR
-    A[Open BuildingLink PDF] --> B[Parse packages]
-    B --> C[Verify packages<br/>search · filter · bulk mark]
-    C --> D[Record errors &<br/>double-logged packages]
-    D --> E[Export report<br/>TXT · CSV · highlighted PDF]
-    C -. auto-saved .-> F[(SQLite audit state)]
-    F -. resume .-> C
-```
-
-1. **Open** a BuildingLink Event Log PDF.
-2. **Verify** packages by clicking a row. Use search and *Unchecked only* to
-   focus, and the bulk actions to clear large groups quickly.
-3. **Record** any package errors and double‑logged packages in their tabs.
-4. **Export** the audit report, CSV, or a highlighted PDF.
-
-### Optional browser scanner workflow
-
-1. Open an audit PDF on the desktop.
-2. Click **Local Phone Scanner** when both devices can reach each other on trusted Wi-Fi. Click
-   **Remote Phone Scanner** on public/guest Wi-Fi, when VPNs must remain enabled, or when the devices are on
-   different networks. Remote mode only requires both devices to have internet access.
-3. Scan the displayed QR code, or enter the shown URL and pairing code.
-   The desktop dialog confirms when the phone is connected and can copy the address when manual entry is easier.
-4. Tap **Scan package** once and hold one tracking barcode inside the green live guide. The scanner reads it
-   automatically—there is no shutter, camera preview, or Submit step. **Existing photo** remains available as a
-   fallback. Browsers that do not permit live camera access fall back to the phone's normal camera-photo screen.
-5. The phone shows the exact unit recorded for that tracking number. Check that unit against the label, then tap
-   **Confirm unit …**. Only that confirmation marks the desktop audit row present. Tap **Scan next package** to
-   resume the already-open camera without another photo workflow.
-6. A reliable tracking barcode absent from the audit is logged in Package Errors as `Not logged`. Duplicate
-   tracking produces a Double Logged row and orange alert. An unreadable or multi-label image asks for a rescan.
-
-Both modes require a temporary pairing code and use a signed browser session plus CSRF checks. Local mode binds
-to the private network and needs no internet service. Remote mode binds the scanner itself to Mac loopback only,
-then `cloudflared` makes an outbound connection to a random temporary `trycloudflare.com` HTTPS address. It is
-free, needs no Cloudflare account, and closes when **Stop Scanner** is clicked. The app checks that the address
-is reachable before displaying it and retries once if Cloudflare issues a bad temporary hostname. Live detections
-and fallback camera crops are handled in memory and are not saved by Package Audit.
-
-Remote-mode traffic—including decoded tracking values and fallback camera crops—passes through Cloudflare because
-Cloudflare terminates the HTTPS connection before forwarding it to this Mac. Use Local mode when keeping all
-traffic on a trusted LAN is more important. Quick Tunnels are intended for temporary use and have no uptime
-guarantee; they are not a permanent hosted service.
-
-If Local mode cannot connect because of VPN routing or Wi-Fi client isolation, stop it and use Remote mode while
-leaving both VPNs enabled. If Remote mode cannot start, run `cloudflared --version`, verify the Mac has internet
-access, and restart the scanner. The phone disables new scans while disconnected and offers a direct retry or
-re-pair action instead of silently continuing with stale state.
-
-Audit state and newly exported files are created with private user-only permissions on platforms that support
-POSIX permission bits. The `data/` and `exports/` directory contents are ignored by Git because PDFs, reports,
-and CSV files may contain resident information. SQLite state remains local and is not encrypted at rest; use
-the operating system's disk encryption and account protections on production workstations. A small rotating
-diagnostic log is stored at `~/.package_audit/package-audit.log` with user-only permissions where supported;
-it records failures and file paths, but the application does not intentionally log parsed resident data.
-
-The pairing code expires after 15 minutes; an already paired phone remains connected until the scanner stops
-or a different PDF is loaded. macOS may ask whether Python can accept incoming network connections the first
-time Local mode starts. Allow it only on a trusted private network.
-
-### Keyboard shortcuts
-
-In the Audit tab:
-
-| Shortcut | Action |
-| --- | --- |
-| Type in search | Filter by unit, resident, tracking, package, or tower |
-| `Down` / `Up` from search | Move into the first / last visible result |
-| `Down` / `Up` in results | Move between rows |
-| `Enter` | Mark/unmark the selected row and return to search |
-| `Enter` with one search result | Mark/unmark it directly and stay in search |
-| `Ctrl+A` | Mark all visible |
-| `Ctrl+Shift+A` | Unmark all visible |
-
-Standard text selection (`Ctrl+A`) still works in the search box and entry tables.
-
-### Reference values
-
-| Locations | Carriers |
-| --- | --- |
-| SHELF, BIN, BB, CG, UG, ALPHA, FCR | USPS, UPS, FEDEX, AMZ, ONTRAC, DHL, PKG, KEY, FOOD, RX |
-
----
-
-## Report format
-
-The exported `.txt` report has three sections:
+## Project layout
 
 ```text
-PACKAGE AUDIT REPORT
-06/15/2026 08:07 PM
-Source: Event log _ BuildingLink.pdf
-
-==================================================
-1. PICKED UP BUT NOT CLOSED OUT
-==================================================
-
-0207S | 5193
-3804S | 9823
-
-==================================================
-2. PACKAGE ERRORS
-==================================================
-
-1701S | BIN | ONTRAC |  | 6651 | wrong unit
-9901S |  | PKG | 1Z000ZZ00000000001 | 0001 | Not logged
-
-==================================================
-3. DOUBLE LOGGED PACKAGES
-==================================================
-
-0201S | BIN | AMZ |  | 5561
-1802S |  | UPS | 1Z999AA10123456784 | 6784
+package-audit/
+├── app/                       # Desktop UI, parsing, matching, persistence, browser scanner
+├── android/                   # Native Android scanner application and JVM tests
+├── native/                    # macOS CoreBluetooth receiver
+├── scripts/                   # Build and disposable hardware-test utilities
+├── tests/                     # Python/Qt regression tests
+├── BLUETOOTH_USAGE.md         # Setup, operation, recovery, acceptance checklist
+├── BLUETOOTH_PROTOCOL.md      # Bluetooth protocol and security boundaries
+└── TERMINAL_USAGE.md          # Detailed terminal and optional browser-scanner guide
 ```
 
-- **Section 1** is generated from packages left unchecked during the audit.
-- **Sections 2 and 3** come from the manual entry tables and automatic scanner records. Their columns are
-  `Unit | Location | Carrier | Tracking | Last 4` plus the Package Errors note.
+## Current limitations
 
----
+- The native Bluetooth desktop receiver currently targets macOS; the Android app is not a general iOS scanner.
+- Android installation is currently a local signed APK, not Play Store distribution.
+- macOS packaging is currently local and not notarized; macOS may require normal local-app approval.
+- Pairing credentials and pending requests intentionally stay in memory. If either app process restarts during a
+  pending confirmation, check the Mac audit before continuing and pair again.
+- Bluetooth range and barcode performance depend on real room layout, metal shelving, lighting, label quality,
+  and supported barcode formats.
+- Browser scanner modes remain for compatibility, but their networking/security behavior differs from the
+  offline Bluetooth mode.
 
-## Audit state management
+## Recommended next steps
 
-Audit progress is stored in a local SQLite database keyed by a hash of the PDF
-contents (`~/.package_audit/audit_state.sqlite3`). Reopening the same export
-restores checked rows and manual entries automatically.
+The best next work should be driven by observations from real audits. In priority order:
 
-- **Clear Current Audit** — removes checked rows, package errors, double‑logged rows,
-  scanner events, and alerts for the loaded PDF.
-- **Clear Manual Sections** — removes only the package errors and double‑logged
-  rows, keeping package verification intact.
+1. **Operational polish:** capture scan latency, pairing friction, repeated rescans, barcode formats that miss,
+   and any confusing wording during several real audit sessions; use that evidence to simplify the phone flow.
+2. **Scan quality and recovery:** tune detection for the real label mix, add clearer guidance for multi-label and
+   damaged labels, and improve the reconnect/pending-save experience only where testing exposes friction.
+3. **Production packaging:** make a repeatable release process, preserve the Android signing key safely, and add
+   macOS Developer ID signing/notarization before distributing to other Macs.
+4. **Field hardening:** test the real package-room range, battery behavior, different Samsung/Android versions,
+   and audit interruption/recovery procedures; keep a small pre-audit acceptance checklist.
+5. **Product decisions:** define user roles, supported property-management exports, onboarding, update delivery,
+   support/privacy policy, and whether the browser scanner should remain a supported fallback.
+6. **Only after the core flow is stable:** consider multi-building configuration, richer operational reporting,
+   scanner analytics that respect privacy, and support for additional hardware/platforms.
 
----
+## Version history
 
-## Release status
-
-**v0.8 (current)** — one-tap live phone camera scanning with automatic browser/desktop decoding fallback and
-two-frame stability checks. The phone shows only the exact audit unit before explicit confirmation.
-
-**v0.7** — secure remote scanning across public networks and VPNs through an ephemeral Cloudflare HTTPS tunnel.
-
-**v0.6** — fast tracking-only phone scanning, exact audit lookup, explicit unit confirmation, automatic image
-submission, and keyboard-first desktop auditing.
-
-**v0.5** — local phone QR/barcode/OCR scanner, confidence review, automatic
-Not logged and duplicate records, alerts, undo, and adaptive matching.
-
-**v0.4** — complete manual audit workflow: parsing, verification, search/filter,
-bulk actions, manual report sections, persistence, and exports.
-
-The remaining distribution work is platform trust and release infrastructure:
-Developer ID signing/notarization for macOS and native Windows artifact validation
-through the included GitHub Actions workflow. Neither requires changing the audit
-or scanner data model.
+- **v0.9.0** — native Android live barcode scanner, direct encrypted Mac Bluetooth transport, one-time QR
+  pairing, exact tracking-only matching, explicit unit confirmation, save verification, reconnect/idempotence,
+  undo, signed local APK build, and disposable S24/Mac hardware acceptance test.
+- **v0.8.0** — one-tap browser live-camera tracking scan with two-frame stability checks.
+- **v0.7.0** — optional temporary Cloudflare remote browser scanner.
+- **v0.6.0** — tracking-only matching, explicit unit confirmation, and keyboard-first desktop auditing.
