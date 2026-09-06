@@ -90,6 +90,15 @@ also require manual lookup. Automatically logged unknown barcodes can be undone.
 Use a throwaway/test audit first, not production rows. Automated tests are not a substitute for this S24/Mac
 radio and camera test:
 
+```bash
+cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
+uv run python scripts/bluetooth_hardware_test.py
+```
+
+This opens a disposable one-package audit, a pairing QR, and a test tracking QR. Follow the instructions in
+the window; a successful confirmation displays `PASS` and writes only to a temporary database that is removed
+when the test closes. Then complete the room/range portions of the checklist below.
+
 1. Unplug USB, turn Wi-Fi and mobile data off on the phone, and leave Bluetooth on on both devices.
 2. Pair and scan a known full tracking barcode. Verify the exact logged unit appears and the Mac row remains
    unchecked until confirmation. Confirm once and verify **Saved on Mac**, one checked row, and correct totals.
