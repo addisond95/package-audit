@@ -15,6 +15,9 @@ command -v uv || brew install uv
 
 # Install the Python environment exactly from uv.lock.
 uv sync --locked
+
+# Optional: enables Remote Phone Scanner across public Wi-Fi and VPNs.
+brew install cloudflared
 ```
 
 The first `uv sync` can take a few minutes. Future launches reuse the environment.
@@ -48,11 +51,11 @@ saved automatically in `~/.package_audit/audit_state.sqlite3`.
 
 The original PDF is never overwritten by a highlighted-PDF export.
 
-## Connect a phone
+## Connect a phone locally
 
 1. Connect the Mac and phone to the same trusted, non-guest Wi-Fi network.
 2. Open an audit PDF in the desktop app.
-3. Click **Start Phone Scanner**.
+3. Click **Local Phone Scanner**.
 4. If macOS asks whether Python or Package Audit may accept incoming connections, allow it on the trusted
    private network.
 5. Scan the QR code in the desktop pairing window with the phone camera. If that does not open, type or copy
@@ -68,9 +71,34 @@ The original PDF is never overwritten by a highlighted-PDF export.
 The pairing code accepts new phones for 15 minutes. A phone that is already paired stays connected until the
 scanner stops or a different audit is loaded. Photos are processed in memory on the Mac and are not saved.
 
+## Connect a phone on public Wi-Fi or through VPNs
+
+Install `cloudflared` once if you skipped it during setup:
+
+```bash
+brew install cloudflared
+cloudflared --version
+```
+
+Then:
+
+1. Leave the VPN enabled on both the Mac and phone. They do not need to be on the same Wi-Fi, but both need
+   internet access.
+2. Open the audit PDF and click **Remote Phone Scanner**.
+3. Wait for **Cloudflare HTTPS tunnel: connected**, then scan the new QR code with the phone. The app verifies
+   the temporary address before displaying it and automatically retries once if Cloudflare returns a bad address.
+4. Tap **Connect to desktop**. The QR link fills the six-digit code automatically; it is not sent to Cloudflare
+   in the initial address request.
+5. Scan and confirm packages exactly as in Local mode.
+6. Click **Stop Scanner** when finished. This shuts down the temporary public address immediately.
+
+Remote mode is free and does not require a Cloudflare account. The address changes on every start and is not a
+permanent hosted service. Barcode decoding still happens on the Mac, but the encrypted requests and barcode
+photos pass through Cloudflare on their way there. Package Audit does not save the photos.
+
 ## Phone connection troubleshooting
 
-If the phone cannot open the scanner page:
+If the phone cannot open the Local scanner page:
 
 1. Leave the desktop scanner window open and verify that its status says the scanner is running.
 2. Confirm both devices are on the same Wi-Fi name. Guest networks often block device-to-device traffic.
@@ -80,6 +108,22 @@ If the phone cannot open the scanner page:
 5. Check **System Settings → Network → Firewall** and allow incoming connections for Python or Package Audit.
 6. Stop and restart the phone scanner after changing Wi-Fi, after the pairing code expires, or if the Mac wakes
    on a different network. Then scan the new QR code.
+
+If either VPN must remain enabled or the Wi-Fi is public/guest Wi-Fi, use **Remote Phone Scanner** instead. It
+does not depend on local-device routing or inbound firewall access.
+
+If Remote mode does not start:
+
+1. Run `cloudflared --version`. If it is missing, run `brew install cloudflared`.
+2. Confirm the Mac can load ordinary HTTPS sites through its current VPN.
+3. Stop and restart Remote mode to request a fresh address.
+4. If the error mentions `config.yml` or `config.yaml`, temporarily move your existing Cloudflare Tunnel config;
+   Quick Tunnels cannot run while that config is active.
+5. If `cloudflared` is installed somewhere unusual, launch with its full path configured:
+
+   ```bash
+   PACKAGE_AUDIT_CLOUDFLARED=/full/path/to/cloudflared uv run package-audit
+   ```
 
 If the page opens but scans fail, keep the app running, use a sharp well-lit image, fill the frame with only
 the tracking barcode, and check that the pairing window says **Tracking barcode scanner: Ready**.
@@ -103,6 +147,12 @@ uv run pip-audit
 uv run python main.py --scanner-smoke
 uv run python main.py --export-smoke
 uv run python main.py --ui-smoke
+```
+
+To test the external service too, run this separately; it needs `cloudflared` and internet access:
+
+```bash
+uv run python main.py --remote-scanner-smoke
 ```
 
 The scanner tests and smoke test open a temporary local port, so macOS or security software may ask for local

@@ -207,7 +207,10 @@ class PackageAuditApp(QMainWindow):
         self._add_button(toolbar, "Export CSV", self.export_csv)
         self._add_button(toolbar, "Export Highlighted PDF", self.export_highlighted_pdf)
         self._add_button(toolbar, "Highlight Color", self.choose_color)
-        self.scanner_button = self._add_button(toolbar, "Start Phone Scanner", self.start_phone_scanner)
+        self.scanner_button = self._add_button(toolbar, "Local Phone Scanner", self.start_phone_scanner)
+        self.remote_scanner_button = self._add_button(
+            toolbar, "Remote Phone Scanner", self.start_remote_phone_scanner
+        )
         toolbar.addWidget(self._make_vline())
         self._add_button(toolbar, "Clear Current Audit", self.clear_current_audit, "danger")
         self._add_button(toolbar, "Clear Manual Sections", self.clear_manual_sections, "danger")
@@ -783,21 +786,47 @@ class PackageAuditApp(QMainWindow):
 
     # ---------------------------------------------------------- phone scanner
     def start_phone_scanner(self) -> None:
+        self._start_phone_scanner(remote=False)
+
+    def start_remote_phone_scanner(self) -> None:
+        self._start_phone_scanner(remote=True)
+
+    def _start_phone_scanner(self, *, remote: bool) -> None:
         if not self._require_entries() or not self.pdf_hash:
             return
         self.scanner_coordinator.configure(
             self.pdf_hash,
             self.entries,
         )
+        if self.scanner_server is not None and self.scanner_server.remote != remote:
+            self.stop_phone_scanner()
         if self.scanner_server is None:
-            self.scanner_server = ScannerServer(self.scanner_coordinator)
+            self.scanner_server = ScannerServer(self.scanner_coordinator, remote=remote)
+        was_running = self.scanner_server.running
+        if remote and not was_running:
+            self.remote_scanner_button.setText("Starting Remote Scanner…")
+            self.statusBar().showMessage("Creating a temporary Cloudflare HTTPS address…")
+            QApplication.processEvents()
         try:
             self.scanner_server.start()
         except OSError as exc:
-            LOGGER.exception("Could not start the local scanner server")
-            QMessageBox.critical(self, "Scanner failed", f"Could not start the local scanner:\n{exc}")
+            mode = "remote" if remote else "local"
+            LOGGER.exception("Could not start the %s scanner server", mode)
+            self.scanner_server.stop()
+            self.scanner_server = None
+            self.scanner_button.setText("Local Phone Scanner")
+            self.remote_scanner_button.setText("Remote Phone Scanner")
+            QMessageBox.critical(
+                self,
+                "Scanner failed",
+                f"Could not start the {mode} phone scanner:\n\n{exc}",
+            )
             return
 
+        if self.scanner_dialog is not None and not was_running:
+            self.scanner_dialog.hide()
+            self.scanner_dialog.deleteLater()
+            self.scanner_dialog = None
         if self.scanner_dialog is None:
             self.scanner_dialog = ScannerPairingDialog(
                 self.scanner_server,
@@ -808,8 +837,15 @@ class PackageAuditApp(QMainWindow):
         self.scanner_dialog.show()
         self.scanner_dialog.raise_()
         self.scanner_dialog.activateWindow()
-        self.scanner_button.setText("Scanner Info")
-        self.statusBar().showMessage(f"Phone scanner running at {self.scanner_server.url}")
+        if remote:
+            self.remote_scanner_button.setText("Remote Scanner Info")
+            self.scanner_button.setText("Local Phone Scanner")
+        else:
+            self.scanner_button.setText("Local Scanner Info")
+            self.remote_scanner_button.setText("Remote Phone Scanner")
+        self.statusBar().showMessage(
+            f"{'Remote' if remote else 'Local'} phone scanner running at {self.scanner_server.url}"
+        )
 
     def stop_phone_scanner(self) -> None:
         dialog = self.scanner_dialog
@@ -826,7 +862,9 @@ class PackageAuditApp(QMainWindow):
             self.scanner_coordinator.invalidate_sessions()
         self.scanner_server = None
         if hasattr(self, "scanner_button"):
-            self.scanner_button.setText("Start Phone Scanner")
+            self.scanner_button.setText("Local Phone Scanner")
+        if hasattr(self, "remote_scanner_button"):
+            self.remote_scanner_button.setText("Remote Phone Scanner")
         self.statusBar().showMessage("Phone scanner stopped.", 5000)
 
     @staticmethod

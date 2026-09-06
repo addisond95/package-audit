@@ -13,6 +13,7 @@ import app.scanner_server as scanner_server
 from app.models import AuditEntry
 from app.scanner_matching import ScanObservation
 from app.scanner_server import ScannerCoordinator, ScannerServer, create_scanner_app
+from app.scanner_tunnel import TunnelStartupError
 
 
 def _entry(
@@ -256,6 +257,26 @@ def test_pairing_page_escapes_prefill_and_sets_private_headers(entries):
     assert "default-src 'self'" in response.headers["Content-Security-Policy"]
 
 
+def test_remote_pairing_uses_secure_cookie_and_fragment_prefill(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    app = create_scanner_app(coordinator, "123456", "secret", remote=True)
+    app.config["TESTING"] = True
+    client = app.test_client()
+
+    landing = client.get("/", base_url="https://quiet-box.trycloudflare.com")
+    paired = client.post(
+        "/pair",
+        data={"code": "123456"},
+        base_url="https://quiet-box.trycloudflare.com",
+    )
+
+    assert b"public Wi-Fi and VPNs" in landing.data
+    assert b"window.location.hash" in landing.data
+    assert paired.status_code == 302
+    assert "Secure" in paired.headers["Set-Cookie"]
+
+
 def test_http_pairing_rate_limits_and_expires(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
@@ -459,6 +480,99 @@ def test_background_server_starts_and_stops(entries):
         server.stop()
         server.stop()
     assert not server.running
+
+
+def test_remote_server_uses_loopback_and_closes_tunnel(entries):
+    class FakeTunnel:
+        def __init__(self):
+            self.running = False
+            self.local_url = ""
+            self.stopped = False
+
+        def start(self, local_url):
+            self.local_url = local_url
+            self.running = True
+            return "https://quiet-box.trycloudflare.com"
+
+        def stop(self):
+            self.running = False
+            self.stopped = True
+
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    tunnel = FakeTunnel()
+    server = ScannerServer(coordinator, remote=True, tunnel_factory=lambda: tunnel)
+
+    server.start()
+    try:
+        assert server.running
+        assert server.host_address == "127.0.0.1"
+        assert tunnel.local_url == f"http://127.0.0.1:{server.port}"
+        assert server.url == "https://quiet-box.trycloudflare.com/#pair=" + server.pairing_code
+        assert "?pair=" not in server.url
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/", timeout=3) as response:
+            assert response.status == 200
+    finally:
+        server.stop()
+
+    assert tunnel.stopped
+    assert not server.running
+
+
+def test_remote_tunnel_failure_closes_local_server(entries):
+    class FailingTunnel:
+        running = False
+
+        def start(self, _local_url):
+            raise OSError("tunnel unavailable")
+
+        def stop(self):
+            pass
+
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    server = ScannerServer(coordinator, remote=True, tunnel_factory=FailingTunnel)
+
+    with pytest.raises(OSError, match="tunnel unavailable"):
+        server.start()
+
+    assert not server.running
+    assert server.port == 0
+
+
+def test_remote_server_retries_one_failed_quick_tunnel(entries):
+    class Tunnel:
+        def __init__(self, url=""):
+            self.url = url
+            self.running = False
+            self.stopped = False
+
+        def start(self, _local_url):
+            if not self.url:
+                raise TunnelStartupError("temporary hostname unavailable")
+            self.running = True
+            return self.url
+
+        def stop(self):
+            self.running = False
+            self.stopped = True
+
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    first = Tunnel()
+    second = Tunnel("https://second-box.trycloudflare.com")
+    tunnels = iter((first, second))
+    server = ScannerServer(coordinator, remote=True, tunnel_factory=lambda: next(tunnels))
+
+    server.start()
+    try:
+        assert server.running
+        assert server.url.startswith("https://second-box.trycloudflare.com/")
+        assert first.stopped
+    finally:
+        server.stop()
+
+    assert second.stopped
 
 
 def test_background_server_reports_bind_exit_as_oserror(entries, monkeypatch):

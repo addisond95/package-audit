@@ -531,3 +531,41 @@ def test_phone_scanner_starts_and_stops_with_loaded_entries(window):
 
     window.stop_phone_scanner()
     assert window.scanner_server is None
+
+
+def test_remote_phone_scanner_uses_remote_mode_and_privacy_notice(window, monkeypatch):
+    class FakeRemoteServer:
+        def __init__(self, coordinator, *, remote=False):
+            self.coordinator = coordinator
+            self.remote = remote
+            self.running = False
+            self.tunnel_running = remote
+            self.url = "https://quiet-box.trycloudflare.com/#pair=123456"
+            self.pairing_code = "123456"
+            self.pairing_seconds_remaining = 900
+            self.stopped = False
+
+        def start(self):
+            self.running = True
+
+        def stop(self):
+            self.running = False
+            self.tunnel_running = False
+            self.stopped = True
+
+    monkeypatch.setattr(main_window, "ScannerServer", FakeRemoteServer)
+    window.entries = [_entry("one", "0205S", "Jane Doe")]
+
+    window.start_remote_phone_scanner()
+
+    assert window.scanner_server is not None
+    assert window.scanner_server.remote is True
+    assert window.remote_scanner_button.text() == "Remote Scanner Info"
+    dialog_text = " ".join(label.text() for label in window.scanner_dialog.findChildren(main_window.QLabel))
+    assert "Cloudflare HTTPS tunnel: connected" in dialog_text
+    assert "does not save" in dialog_text
+
+    server = window.scanner_server
+    window.stop_phone_scanner()
+    assert server.stopped
+    assert window.remote_scanner_button.text() == "Remote Phone Scanner"

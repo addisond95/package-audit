@@ -1,4 +1,4 @@
-"""Desktop controls for pairing a phone with the local scanner server."""
+"""Desktop controls for pairing a phone with the scanner server."""
 
 from __future__ import annotations
 
@@ -44,13 +44,19 @@ class ScannerPairingDialog(QDialog):
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(12)
 
-        title = QLabel("Phone scanner is ready")
+        title = QLabel("Remote phone scanner is ready" if server.remote else "Local phone scanner is ready")
         title.setObjectName("scannerTitle")
         layout.addWidget(title)
 
         status = QLabel(f"Tracking barcode scanner: {'Ready' if capabilities.barcode else 'Unavailable'}")
         status.setObjectName("scannerStatus")
         layout.addWidget(status)
+
+        route_status = QLabel(
+            "Cloudflare HTTPS tunnel: connected" if server.remote else "Direct local Wi-Fi connection"
+        )
+        route_status.setObjectName("scannerStatus")
+        layout.addWidget(route_status)
 
         qr_label = QLabel()
         qr_label.setAlignment(Qt.AlignCenter)
@@ -78,6 +84,22 @@ class ScannerPairingDialog(QDialog):
         url.setWordWrap(True)
         url.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(url)
+
+        privacy = QLabel(
+            (
+                "Remote mode sends barcode photos through Cloudflare over HTTPS. "
+                "Package Audit processes them on this Mac and does not save them. "
+                "Stopping the scanner closes this temporary public address."
+            )
+            if server.remote
+            else (
+                "Local mode stays on your trusted Wi-Fi. Package Audit processes "
+                "barcode photos on this Mac and does not save them."
+            )
+        )
+        privacy.setWordWrap(True)
+        privacy.setObjectName("scannerStatus")
+        layout.addWidget(privacy)
 
         buttons = QHBoxLayout()
         open_button = QPushButton("Open on This Mac")
@@ -123,6 +145,9 @@ class ScannerPairingDialog(QDialog):
         self.copy_reset_timer.start(1500)
 
     def _refresh_status(self) -> None:
+        if self.server.remote and not self.server.tunnel_running:
+            self.connection_status.setText("Remote tunnel disconnected — stop and restart the scanner")
+            return
         phone_count = self.server.coordinator.active_phone_count()
         if phone_count:
             noun = "phone" if phone_count == 1 else "phones"

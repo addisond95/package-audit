@@ -39,12 +39,14 @@ transcription work by capturing audit observations directly as structured data.
 - Bulk *Mark All Visible* / *Unmark All Visible* (respect the active search/filter)
 - Progress is saved automatically and resumes when the same PDF is reopened
 
-**Phone scanner (local and free)**
-- Pair a phone browser over the same Wi‑Fi using a temporary six-digit code or QR code
+**Phone scanner (local or remote, both free)**
+- Use **Local Phone Scanner** on trusted same-device Wi-Fi with no internet dependency
+- Use **Remote Phone Scanner** across public/guest networks and VPNs through a temporary Cloudflare HTTPS address
+- Pair a phone browser using a temporary six-digit code or QR code
 - Capture one tracking barcode at a time; no resident-name or unit OCR is performed
 - See live audited/remaining totals, alert counts, and desktop connection state on the phone
 - Tap **Scan package**, take the picture, and the phone automatically resizes and submits it
-- Decode barcodes locally on the desktop with ZXing; no slow OCR or cloud service is involved
+- Decode barcodes locally on the desktop with ZXing; no slow OCR or cloud recognition service is involved
 - Require an exact full-tracking-number match—never fuzzy matching, names, units, or last-four alone
 - Show the audit's logged unit on the phone and mark it present only after explicit confirmation
 - Log reliable tracking barcodes absent from the audit as `Not logged`
@@ -88,7 +90,8 @@ package-audit/
 │   ├── export_utils.py     # Safe CSV cells + atomic private exports
 │   ├── delegates.py        # Table cell editors (dropdowns)
 │   ├── scanner_matching.py # Exact tracking-number lookup
-│   ├── scanner_server.py   # Paired local-network phone web app
+│   ├── scanner_server.py   # Paired local/remote phone web app
+│   ├── scanner_tunnel.py   # Optional temporary Cloudflare HTTPS tunnel
 │   ├── scanner_vision.py   # Fast local barcode decoding
 │   ├── scanner_ui.py       # Desktop pairing dialog
 │   ├── theme.py            # Qt stylesheet
@@ -118,6 +121,9 @@ uv run package-audit
 Barcode scanning is included in the Python environment and packaged application;
 there is no separate OCR program to install.
 
+Remote scanning needs the free `cloudflared` utility. On macOS, install it once with
+`brew install cloudflared`. Local scanning does not need it.
+
 For a complete terminal walkthrough, phone-pairing steps, and connection troubleshooting, see
 [TERMINAL_USAGE.md](TERMINAL_USAGE.md).
 
@@ -131,6 +137,7 @@ uv run bandit -q -r app main.py
 uv run pip-audit
 uv run python main.py --export-smoke
 uv run python main.py --scanner-smoke
+uv run python main.py --remote-scanner-smoke # optional: needs cloudflared + internet
 uv run python main.py --ui-smoke
 ```
 
@@ -164,8 +171,10 @@ flowchart LR
 ### Phone scanner workflow
 
 1. Open an audit PDF on the desktop.
-2. Click **Start Phone Scanner**.
-3. Scan the displayed QR code with a phone on the same Wi‑Fi, or enter the shown URL and pairing code.
+2. Click **Local Phone Scanner** when both devices can reach each other on trusted Wi-Fi. Click
+   **Remote Phone Scanner** on public/guest Wi-Fi, when VPNs must remain enabled, or when the devices are on
+   different networks. Remote mode only requires both devices to have internet access.
+3. Scan the displayed QR code, or enter the shown URL and pairing code.
    The desktop dialog confirms when the phone is connected and can copy the address when manual entry is easier.
 4. Tap **Scan package**, frame one tracking barcode, take the picture, and accept the phone's camera preview.
    The image is resized and submitted automatically—there is no app-level Submit step. **Existing photo** is a
@@ -175,14 +184,22 @@ flowchart LR
 6. A reliable tracking barcode absent from the audit is logged in Package Errors as `Not logged`. Duplicate
    tracking produces a Double Logged row and orange alert. An unreadable or multi-label image asks for a rescan.
 
-The phone scanner binds to the local network only, requires a temporary pairing code, uses a signed browser
-session plus CSRF checks, and does not require internet access or a paid service. Keep the phone and computer
-on a trusted private Wi‑Fi network. Photos are decoded in memory and are not saved.
+Both modes require a temporary pairing code and use a signed browser session plus CSRF checks. Local mode binds
+to the private network and needs no internet service. Remote mode binds the scanner itself to Mac loopback only,
+then `cloudflared` makes an outbound connection to a random temporary `trycloudflare.com` HTTPS address. It is
+free, needs no Cloudflare account, and closes when **Stop Scanner** is clicked. The app checks that the address
+is reachable before displaying it and retries once if Cloudflare issues a bad temporary hostname. Photos are
+decoded in memory on the desktop and are not saved by Package Audit.
 
-If the phone reports that the desktop is unavailable, keep the desktop scanner running and confirm both devices
-are on the same non-guest Wi‑Fi; VPNs and access-point client isolation can prevent local-device connections.
-The phone disables new scans while disconnected and offers a direct retry or re-pair action instead of silently
-continuing with stale state.
+Remote-mode traffic—including barcode photos—passes through Cloudflare because Cloudflare terminates the HTTPS
+connection before forwarding it to this Mac. Use Local mode when keeping all traffic on a trusted LAN is more
+important. Quick Tunnels are intended for temporary use and have no uptime guarantee; they are not a permanent
+hosted service.
+
+If Local mode cannot connect because of VPN routing or Wi-Fi client isolation, stop it and use Remote mode while
+leaving both VPNs enabled. If Remote mode cannot start, run `cloudflared --version`, verify the Mac has internet
+access, and restart the scanner. The phone disables new scans while disconnected and offers a direct retry or
+re-pair action instead of silently continuing with stale state.
 
 Audit state and newly exported files are created with private user-only permissions on platforms that support
 POSIX permission bits. The `data/` and `exports/` directory contents are ignored by Git because PDFs, reports,
@@ -193,7 +210,7 @@ it records failures and file paths, but the application does not intentionally l
 
 The pairing code expires after 15 minutes; an already paired phone remains connected until the scanner stops
 or a different PDF is loaded. macOS may ask whether Python can accept incoming network connections the first
-time the scanner starts. Allow it only on a trusted private network.
+time Local mode starts. Allow it only on a trusted private network.
 
 ### Keyboard shortcuts
 
