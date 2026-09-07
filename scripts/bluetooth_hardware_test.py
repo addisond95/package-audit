@@ -81,10 +81,11 @@ def main() -> None:
         def check_saved() -> None:
             if window.db.load_state(AUDIT_ID).get(ITEM_ID):
                 events = window.db.load_scanner_events(AUDIT_ID)
-                if len(events) == 1 and events[0].status == "matched":
+                matched = [event for event in events if event.status == "matched"]
+                if len(matched) == 1:
                     result.setText(
                         "PASS — the S24 camera decoded the tracking QR, the encrypted Bluetooth link "
-                        "returned the correct unit, and the Mac saved exactly one confirmation."
+                        "returned the correct unit, and the Mac saved exactly one successful confirmation."
                     )
                     result.setStyleSheet("color: #176b4d; font-weight: 700;")
                     print("bluetooth-hardware-test-pass", flush=True)

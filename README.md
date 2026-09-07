@@ -196,8 +196,9 @@ uv run python scripts/bluetooth_hardware_test.py
 ```
 
 It creates a temporary one-package audit, shows a pairing QR and a test tracking QR, and reports PASS only after
-the phone scans, receives the expected unit, confirms it, and the Mac has saved exactly one audit event. The
-temporary database is removed when the test closes. It does not touch production audit data.
+the phone scans, receives the expected unit, confirms it, and the Mac has saved exactly one successful
+confirmation. Rejected rescan attempts do not cause a false failure. The temporary database is removed when the
+test closes. It does not touch production audit data.
 
 For a real acceptance test, also try representative carrier labels, poor lighting, known unknown/duplicate
 labels, background/reconnect behavior, and the actual package-room range. The hardware checklist is in
