@@ -104,6 +104,34 @@ def test_sorted_row_toggle_updates_the_displayed_entry_and_database(window):
     assert window.db.load_state("ui-test") == {"high": True}
 
 
+def test_audit_table_shows_inferred_package_type(window):
+    window.entries = [_entry("key", "0205S", "Private Resident")]
+    window.entries[0].package = "KEY - #1 - Keys for resident, Alpha P"
+
+    window._refresh_table()
+
+    assert window.table.horizontalHeaderItem(2).text() == "Type"
+    assert window.table.item(0, 2).text() == "Keys"
+
+
+def test_csv_export_includes_inferred_package_type(window, tmp_path, monkeypatch):
+    output = tmp_path / "audit.csv"
+    window.entries = [_entry("food", "0205S", "Private Resident")]
+    window.entries[0].package = "FOOD - #1 - Perishable delivery"
+    monkeypatch.setattr(
+        main_window.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: (str(output), "CSV Files (*.csv)"),
+    )
+    monkeypatch.setattr(main_window.QMessageBox, "information", lambda *_args: None)
+
+    window.export_csv()
+
+    with output.open(newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["package_type"] == "Perishable"
+
+
 def test_open_pdf_allows_reopening_the_current_source(window, tmp_path, monkeypatch):
     source = tmp_path / "event-log.pdf"
     source.write_bytes(b"pdf")

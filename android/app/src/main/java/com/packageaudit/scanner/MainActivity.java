@@ -13,7 +13,6 @@ import androidx.camera.core.*;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.zxing.Result;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,12 +27,15 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
     private ProcessCameraProvider cameras;
     private Camera camera;
     private PreviewView preview;
+    private FrameLayout cameraFrame;
     private TextView connection, instructions, unit, details, progress;
     private Button pair, reconnect, scan, confirm, next, undo, torch;
     private boolean pairingMode, scanning, cameraRunning, startingCamera, foreground, requestInFlight;
     private boolean torchOn;
-    private String lastSet = "", blockedSet = "";
-    private int hits, clearFrames;
+    private final Map<String, Integer> codeHits = new HashMap<>();
+    private final Set<String> previousCodes = new HashSet<>();
+    private final Set<String> blockedCodes = new HashSet<>();
+    private int clearFrames;
     private JSONObject current, lastSaved;
     private long resultEpoch;
 
@@ -41,7 +43,16 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | WindowManager.LayoutParams.FLAG_SECURE);
         ble = new BleClient(this, this);
-        analyzer = new BarcodeAnalyzer(values -> main.post(() -> onBarcodes(values)));
+        analyzer = new BarcodeAnalyzer(
+            cameraExecutor,
+            values -> main.post(() -> onBarcodes(values)),
+            ratio -> {
+                main.post(() -> {
+                    if (camera != null)
+                        camera.getCameraControl().setZoomRatio(Math.max(1.0f, Math.min(3.0f, ratio)));
+                });
+                return true;
+            });
         buildScreen();
     }
 
@@ -76,8 +87,11 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         preview = new PreviewView(this);
         preview.setImplementationMode(PreviewView.ImplementationMode.COMPATIBLE);
         preview.setScaleType(PreviewView.ScaleType.FILL_CENTER);
-        layout.addView(preview, new LinearLayout.LayoutParams(-1, dp(280)));
-        preview.setVisibility(View.GONE);
+        cameraFrame = new FrameLayout(this);
+        cameraFrame.addView(preview, new FrameLayout.LayoutParams(-1, -1));
+        cameraFrame.addView(new ScanGuideView(this), new FrameLayout.LayoutParams(-1, -1));
+        layout.addView(cameraFrame, new LinearLayout.LayoutParams(-1, dp(360)));
+        cameraFrame.setVisibility(View.GONE);
         instructions = label(layout, "Pair once for this audit session. Wi-Fi and mobile data can stay off.", 16);
         unit = label(layout, "", 42);
         details = label(layout, "", 16);
@@ -129,7 +143,7 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
 
     private void preparePairing() {
         ble.forget(); pairingMode = true; scanning = false; current = lastSaved = null;
-        requestInFlight = false; resultEpoch++; blockedSet = ""; resetDetection();
+        requestInFlight = false; resultEpoch++; blockedCodes.clear(); resetDetection();
         unit.setText(""); details.setText(""); confirm.setVisibility(View.GONE); next.setVisibility(View.GONE);
         undo.setVisibility(View.GONE); scan.setEnabled(false);
         instructions.setText("Point at the pairing QR inside the Mac's Bluetooth Scanner window.");
@@ -152,7 +166,7 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         }
         if (startingCamera) return;
         startingCamera = true;
-        preview.setVisibility(View.VISIBLE);
+        cameraFrame.setVisibility(View.VISIBLE);
         ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
         future.addListener(() -> {
             startingCamera = false;
@@ -162,7 +176,7 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
                 Preview live = new Preview.Builder().build();
                 live.setSurfaceProvider(preview.getSurfaceProvider());
                 ImageAnalysis analysis = new ImageAnalysis.Builder()
-                    .setTargetResolution(new Size(1280, 720))
+                    .setTargetResolution(new Size(1920, 1080))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build();
                 analysis.setAnalyzer(cameraExecutor, analyzer);
                 cameras.unbindAll();
@@ -173,29 +187,47 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
                 cameraRunning = true;
                 analyzer.enabled = pairingMode || scanning && ble.ready() && !requestInFlight;
                 torch.setVisibility(camera.getCameraInfo().hasFlashUnit() ? View.VISIBLE : View.GONE);
+                focusCenter();
             } catch (Exception error) { instructions.setText("Camera could not start. Close other camera apps, then retry."); }
         }, getMainExecutor());
     }
 
-    private void resetDetection() { hits = 0; lastSet = ""; clearFrames = 0; }
+    private void resetDetection() {
+        codeHits.clear(); previousCodes.clear(); clearFrames = 0;
+    }
 
-    private void onBarcodes(List<Result> values) {
+    private void focusCenter() {
+        preview.post(() -> {
+            if (camera == null || preview.getWidth() == 0 || preview.getHeight() == 0) return;
+            MeteringPoint point = preview.getMeteringPointFactory().createPoint(
+                preview.getWidth() / 2.0f, preview.getHeight() / 2.0f);
+            camera.getCameraControl().startFocusAndMetering(new FocusMeteringAction.Builder(point).build());
+        });
+    }
+
+    private void onBarcodes(List<DetectedBarcode> values) {
         if (!foreground || !analyzer.enabled) return;
         if (values.isEmpty()) {
-            hits = 0; lastSet = "";
-            if (++clearFrames >= 3) blockedSet = "";
+            codeHits.clear(); previousCodes.clear();
+            if (++clearFrames >= 3) blockedCodes.clear();
             return;
         }
         clearFrames = 0;
-        // Stable sorted sets prevent frame order from producing different tracking identities.
+        // Stabilize each code independently. Incidental barcodes may flicker on busy
+        // shipping labels without delaying a tracking code that is consistently clear.
         TreeMap<String, String> codes = new TreeMap<>();
-        for (Result value : values) codes.put(value.getText().trim(), value.getBarcodeFormat().toString());
-        String signature = codes.toString();
-        if (signature.equals(blockedSet)) return;
-        if (!signature.equals(lastSet)) { lastSet = signature; hits = 1; return; }
-        if (++hits < 2) return;
+        for (DetectedBarcode value : values) codes.put(value.value.trim(), value.format);
+        Map<String, Integer> nextHits = new HashMap<>();
+        for (String value : codes.keySet())
+            nextHits.put(value, previousCodes.contains(value) ? codeHits.getOrDefault(value, 0) + 1 : 1);
+        codeHits.clear(); codeHits.putAll(nextHits);
+        previousCodes.clear(); previousCodes.addAll(codes.keySet());
+        TreeMap<String, String> stable = new TreeMap<>();
+        for (Map.Entry<String, String> code : codes.entrySet())
+            if (codeHits.getOrDefault(code.getKey(), 0) >= 2) stable.put(code.getKey(), code.getValue());
+        if (stable.isEmpty() || !blockedCodes.isEmpty() && blockedCodes.containsAll(stable.keySet())) return;
         if (pairingMode) {
-            for (String value : codes.keySet()) if (value.startsWith("packageaudit:")) {
+            for (String value : stable.keySet()) if (value.startsWith("packageaudit:")) {
                 try {
                     ble.pair(value); pairingMode = false; analyzer.enabled = false;
                     instructions.setText("Connecting to your Mac…");
@@ -205,15 +237,15 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
             instructions.setText("Scan the pairing QR from the Mac, then scan package labels."); return;
         }
         if (!scanning || !ble.ready() || requestInFlight || ble.busy()) return;
-        if (codes.keySet().stream().anyMatch(value -> value.startsWith("packageaudit:"))) {
+        if (stable.keySet().stream().anyMatch(value -> value.startsWith("packageaudit:"))) {
             instructions.setText("That is a pairing QR. Point at a package tracking barcode."); return;
         }
         try {
             JSONObject request = BleClient.request("scan");
-            request.put("barcodes", new JSONArray(codes.keySet()));
-            request.put("formats", new JSONArray(codes.values()));
+            request.put("barcodes", new JSONArray(stable.keySet()));
+            request.put("formats", new JSONArray(stable.values()));
             if (ble.send(request)) {
-                blockedSet = signature;
+                blockedCodes.clear(); blockedCodes.addAll(stable.keySet());
                 requestInFlight = true; scanning = false; analyzer.enabled = false;
                 instructions.setText("Looking up tracking on Mac…"); updateControls();
             }
@@ -277,7 +309,7 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
             long epoch = resultEpoch;
             main.postDelayed(() -> { if (epoch == resultEpoch && foreground && !requestInFlight) nextPackage(); }, 900);
         }
-        if ("rejected".equals(status)) { blockedSet = ""; nextPackage(); }
+        if ("rejected".equals(status)) { blockedCodes.clear(); nextPackage(); }
     }
 
     private void updateProgress(JSONObject value) {
@@ -318,7 +350,9 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         resultEpoch++; current = null; resetDetection(); scanning = true;
         unit.setText(""); details.setText(""); confirm.setVisibility(View.GONE); next.setVisibility(View.GONE);
         instructions.setText("Fill the camera with one tracking barcode. Tap the preview to focus.");
-        analyzer.enabled = true; startCamera(); updateControls();
+        analyzer.enabled = true;
+        if (camera != null) camera.getCameraControl().setZoomRatio(1.0f);
+        startCamera(); focusCenter(); updateControls();
     }
 
     @Override protected void onStart() {
@@ -334,6 +368,6 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         super.onStop();
     }
     @Override protected void onDestroy() {
-        main.removeCallbacksAndMessages(null); ble.pause(); cameraExecutor.shutdown(); super.onDestroy();
+        main.removeCallbacksAndMessages(null); ble.pause(); analyzer.close(); cameraExecutor.shutdown(); super.onDestroy();
     }
 }

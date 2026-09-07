@@ -6,10 +6,22 @@ by the database, reporting, and test layers without the GUI stack.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from app.constants import CARRIER_ALIASES, MISSING_LAST4
+
+
+class PackageType(str, Enum):
+    """Package categories that affect audit handling and report output."""
+
+    PACKAGE = "Package"
+    PERISHABLE = "Perishable"
+    KEYS = "Keys"
+    ENVELOPE = "Envelope"
+    ALPHA = "Alpha"
 
 
 @dataclass
@@ -31,6 +43,18 @@ class AuditEntry:
         return extract_last4(self.package)
 
     @property
+    def package_type(self) -> PackageType:
+        """Classify special non-tracking entries from their BuildingLink text."""
+        return infer_package_type(self.package)
+
+    @property
+    def open_report_reference(self) -> str:
+        """Render a useful type instead of ``NaN`` for special open items."""
+        if self.package_type is not PackageType.PACKAGE:
+            return self.package_type.value
+        return normalize_last4(self.last4)
+
+    @property
     def search_text(self) -> str:
         """Lower-cased haystack used for the audit table search filter."""
         return " ".join(
@@ -39,6 +63,7 @@ class AuditEntry:
                 self.last4,
                 self.resident,
                 self.package,
+                self.package_type.value,
                 self.tower,
                 self.timestamp,
                 str(self.page_index + 1),
@@ -161,6 +186,27 @@ def unit_sort_key(unit: str) -> tuple[int, str]:
 
     number = int(digits) if digits else 999999
     return number, suffix
+
+
+_PACKAGE_TYPE_PATTERNS = (
+    (PackageType.PERISHABLE, re.compile(r"\b(?:FOOD|PERISHABLE)\b", re.IGNORECASE)),
+    (PackageType.KEYS, re.compile(r"\bKEYS?\b", re.IGNORECASE)),
+    (PackageType.ENVELOPE, re.compile(r"\b(?:ENVELOPE|ENV)\b", re.IGNORECASE)),
+    (PackageType.ALPHA, re.compile(r"\b(?:ALPHA?|ALFA)\b", re.IGNORECASE)),
+)
+
+
+def infer_package_type(package_text: str) -> PackageType:
+    """Infer a special package type using explicit, bounded label keywords.
+
+    Precedence matters for records such as ``KEY ... Alpha P``: the item is a
+    set of keys stored at Alpha, so it should be reported as ``Keys``.
+    """
+    text = " ".join(package_text.split())
+    for package_type, pattern in _PACKAGE_TYPE_PATTERNS:
+        if pattern.search(text):
+            return package_type
+    return PackageType.PACKAGE
 
 
 def extract_last4(package_text: str) -> str:

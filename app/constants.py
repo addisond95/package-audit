@@ -42,5 +42,12 @@ CARRIER_ALIASES = {
 #: Placeholder used when a tracking value cannot be determined.
 MISSING_LAST4 = "NaN"
 
+#: Report-note thresholds are deliberately centralized so a property can tune
+#: policy without changing report-generation logic. A note appears when the
+#: count reaches the configured threshold.
+PACKAGE_ERROR_NOTE_THRESHOLD = 3
+DOUBLE_LOGGED_NOTE_THRESHOLD = 3
+NOT_CLOSED_OUT_NOTE_THRESHOLD = 3
+
 #: Default audit highlight color as an RGBA tuple (0-255 per channel).
 DEFAULT_HIGHLIGHT_RGBA = (80, 200, 120, 95)

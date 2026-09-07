@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.models import (
     AuditEntry,
+    PackageType,
     extract_last4,
+    infer_package_type,
     normalize_carrier,
     normalize_last4,
     normalize_location,
@@ -60,6 +64,31 @@ def test_extract_last4_from_buildinglink_examples():
 def test_extract_last4_returns_nan_when_no_tracking():
     assert extract_last4("KEY - #2209130287 - Keys for Pelin, Alpha P") == "NaN"
     assert extract_last4("") == "NaN"
+
+
+@pytest.mark.parametrize(
+    "package_text, expected",
+    [
+        ("FOOD - #1 - Perishable delivery", PackageType.PERISHABLE),
+        ("PKG - #2 - food", PackageType.PERISHABLE),
+        ("KEY - #3 - Keys for resident, Alpha P", PackageType.KEYS),
+        ("PKG - #4 - Envelope", PackageType.ENVELOPE),
+        ("PKG - #5 - ENV", PackageType.ENVELOPE),
+        ("PKG - #6 - Alpha P", PackageType.ALPHA),
+        ("PKG - #7 - Alfa shelf", PackageType.ALPHA),
+        ("UPS - #8 - 1Z999AA10123456784", PackageType.PACKAGE),
+        ("UPS - #9 - ALPHABET1234", PackageType.PACKAGE),
+    ],
+)
+def test_infer_package_type(package_text, expected):
+    assert infer_package_type(package_text) is expected
+
+
+def test_special_package_types_replace_nan_in_open_report_reference():
+    entry = AuditEntry("key", 0, "1701S", "Resident", "KEY - #1 - Keys, Alpha P", "", "")
+    assert entry.last4 == "NaN"
+    assert entry.package_type is PackageType.KEYS
+    assert entry.open_report_reference == "Keys"
 
 
 def test_unit_sort_key_orders_numerically():

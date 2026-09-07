@@ -8,9 +8,10 @@ The primary scanner workflow is a Samsung/Android phone connected directly to a 
 no browser, Wi-Fi, hotspot, internet connection, Cloudflare tunnel, account, or subscription is needed during
 an audit.
 
-> Status: version 0.9.0 is a locally installed Mac + Android solution that has been tested end-to-end on a
-> Mac and Samsung Galaxy S24 Ultra. It is not yet a notarized macOS release, Play Store release, or formally
-> independently security-audited product.
+> Status: the version 0.9 workflow was tested end-to-end on a Mac and Samsung Galaxy S24 Ultra. Version 0.10.0
+> adds the scanner and reporting improvements below and has passed automated desktop/Android checks; its updated
+> camera behavior still needs the real-label acceptance test described below. It is not yet a notarized macOS
+> release, Play Store release, or formally independently security-audited product.
 
 ## What it does today
 
@@ -22,12 +23,17 @@ an audit.
   unit without reselecting the search field.
 - Saves audit progress locally in SQLite and restores it when the same PDF is reopened.
 - Keeps package errors and double-logged packages in spreadsheet-style editable tables.
+- Classifies Package, Perishable, Keys, Envelope, and Alpha audit entries and shows the type in the audit table.
+- Adds an Audit Notes report section when package errors, duplicate logs, or not-closed-out packages reach the
+  current three-item attention threshold.
 - Exports a text audit report, spreadsheet-safe CSV, and a highlighted copy of the source PDF.
 
 ### Offline Android Bluetooth scanner
 
 - Runs as a native Android app, not a web page.
 - Uses the phone camera for live barcode recognition; photos and video frames remain in phone memory.
+- Combines a bundled on-device ML Kit detector with the local ZXing fallback, higher-resolution analysis,
+  automatic zoom suggestions, center refocus, and an aiming guide for difficult shipping labels.
 - Sends only decoded barcode values and audit responses through an encrypted Bluetooth connection to the Mac.
 - Uses one-time QR pairing for each scanner/audit session; normal macOS Bluetooth-device pairing is not used.
 - Matches only an exact, full tracking number. It does not OCR resident names, printed labels, or unit numbers,
@@ -104,7 +110,7 @@ public Wi-Fi, mobile data, and hotspot configuration do not affect Bluetooth sca
 The signed installer produced by this workspace is:
 
 ```text
-dist/PackageAuditScanner-0.9.0.apk
+dist/PackageAuditScanner-0.10.0.apk
 ```
 
 Enable **USB debugging** in Android Developer options, connect an unlocked phone with a USB data cable, approve
@@ -113,7 +119,7 @@ the Mac's debugging key, and run:
 ```bash
 cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
 adb devices -l
-adb install -r dist/PackageAuditScanner-0.9.0.apk
+adb install -r dist/PackageAuditScanner-0.10.0.apk
 ```
 
 The device must display `device` in the first command. Choose **Transferring files / Android Auto** for the USB
@@ -263,10 +269,10 @@ package-audit/
 
 The best next work should be driven by observations from real audits. In priority order:
 
-1. **Operational polish:** capture scan latency, pairing friction, repeated rescans, barcode formats that miss,
-   and any confusing wording during several real audit sessions; use that evidence to simplify the phone flow.
-2. **Scan quality and recovery:** tune detection for the real label mix, add clearer guidance for multi-label and
-   damaged labels, and improve the reconnect/pending-save experience only where testing exposes friction.
+1. **Operational polish:** measure the v0.10 dual-engine scanner against the real label mix, capturing scan
+   latency, remaining misses, glare/damage conditions, and confusing wording during several audit sessions.
+2. **Scan quality and recovery:** use those missed-label examples to tune supported formats, camera behavior,
+   guidance for multi-label/damaged labels, and reconnect handling without weakening exact matching.
 3. **Production packaging:** make a repeatable release process, preserve the Android signing key safely, and add
    macOS Developer ID signing/notarization before distributing to other Macs.
 4. **Field hardening:** test the real package-room range, battery behavior, different Samsung/Android versions,
@@ -278,6 +284,9 @@ The best next work should be driven by observations from real audits. In priorit
 
 ## Version history
 
+- **v0.10.0** — bundled on-device ML Kit plus ZXing fallback, higher-resolution scanning, auto-zoom/refocus and
+  aiming guide, package-type classification, meaningful special-item report labels, and threshold-driven Audit
+  Notes.
 - **v0.9.0** — native Android live barcode scanner, direct encrypted Mac Bluetooth transport, one-time QR
   pairing, exact tracking-only matching, explicit unit confirmation, save verification, reconnect/idempotence,
   undo, signed local APK build, and disposable S24/Mac hardware acceptance test.

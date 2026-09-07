@@ -68,7 +68,7 @@ from app.scanner_ui import ScannerPairingDialog
 from app.scanner_vision import scanner_capabilities
 from app.theme import build_stylesheet
 
-AUDIT_HEADERS = ["Done", "Unit", "Last 4", "Resident", "Package", "Tower", "Timestamp", "Page"]
+AUDIT_HEADERS = ["Done", "Unit", "Type", "Last 4", "Resident", "Package", "Tower", "Timestamp", "Page"]
 ERROR_HEADERS = ["Unit", "Location", "Carrier", "Tracking", "Last 4", "Error Note"]
 DOUBLE_HEADERS = ["Unit", "Location", "Carrier", "Tracking", "Last 4"]
 ALERT_HEADERS = ["Status", "Type", "Unit", "Carrier", "Tracking", "Last 4", "Message", "Time"]
@@ -286,9 +286,9 @@ class PackageAuditApp(QMainWindow):
 
         header = self.table.horizontalHeader()
         header.setHighlightSections(False)
-        for col, width in enumerate((70, 90, 80, 260, 570, 120, 170, 60)):
+        for col, width in enumerate((70, 90, 100, 80, 240, 520, 120, 170, 60)):
             self.table.setColumnWidth(col, width)
-        header.setSectionResizeMode(4, QHeaderView.Stretch)  # Package column flexes.
+        header.setSectionResizeMode(5, QHeaderView.Stretch)  # Package column flexes.
 
         layout.addLayout(controls)
         layout.addWidget(self.table)
@@ -495,6 +495,7 @@ class PackageAuditApp(QMainWindow):
             values = [
                 "✓" if entry.audited else "",
                 entry.unit,
+                entry.package_type.value,
                 entry.last4,
                 entry.resident,
                 entry.package,
@@ -1318,6 +1319,7 @@ class PackageAuditApp(QMainWindow):
                         [
                             "audited",
                             "unit",
+                            "package_type",
                             "last4",
                             "resident",
                             "package",
@@ -1331,6 +1333,7 @@ class PackageAuditApp(QMainWindow):
                             [
                                 "yes" if entry.audited else "no",
                                 spreadsheet_safe_cell(entry.unit),
+                                spreadsheet_safe_cell(entry.package_type.value),
                                 spreadsheet_safe_cell(entry.last4),
                                 spreadsheet_safe_cell(entry.resident),
                                 spreadsheet_safe_cell(entry.package),

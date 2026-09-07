@@ -1,7 +1,7 @@
 """Plain-text audit report generation.
 
-Produces the three-section report: packages still open, manually recorded
-package errors, and manually recorded double-logged packages.
+Produces the audit's open-package, error, duplicate, and threshold-driven note
+sections.
 """
 
 from __future__ import annotations
@@ -9,13 +9,17 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from app.constants import (
+    DOUBLE_LOGGED_NOTE_THRESHOLD,
+    NOT_CLOSED_OUT_NOTE_THRESHOLD,
+    PACKAGE_ERROR_NOTE_THRESHOLD,
+)
 from app.export_utils import atomic_output_path
 from app.models import (
     AuditEntry,
     DoubleLoggedPackage,
     PackageError,
     normalize_carrier,
-    normalize_last4,
     normalize_location,
     normalize_tracking,
     normalize_unit,
@@ -69,7 +73,7 @@ def make_audit_report(
     lines.append("")
     lines.extend(
         _format_rows(
-            [[normalize_unit(e.unit), normalize_last4(e.last4)] for e in unchecked],
+            [[normalize_unit(e.unit), e.open_report_reference] for e in unchecked],
         )
     )
 
@@ -111,6 +115,35 @@ def make_audit_report(
             ],
         )
     )
+
+    # ── Section 4 ──────────────────────────────────────────────────────────
+    audit_notes: list[list[str]] = []
+    if len(package_errors) >= PACKAGE_ERROR_NOTE_THRESHOLD:
+        audit_notes.append(
+            [
+                f"{len(package_errors)} package errors recorded. Staff should take extra care to verify "
+                "the unit, package type, tracking number, and storage location when logging packages."
+            ]
+        )
+    if len(double_logged) >= DOUBLE_LOGGED_NOTE_THRESHOLD:
+        audit_notes.append(
+            [
+                f"{len(double_logged)} double-logged packages recorded. Staff should take extra care to "
+                "search for an existing entry before logging a package again."
+            ]
+        )
+    if len(unchecked) >= NOT_CLOSED_OUT_NOTE_THRESHOLD:
+        audit_notes.append(
+            [
+                f"{len(unchecked)} packages were picked up but not closed out. Staff should take extra care "
+                "to close out packages promptly when residents collect them."
+            ]
+        )
+
+    lines.append("")
+    lines.append(_section(4, "AUDIT NOTES"))
+    lines.append("")
+    lines.extend(_format_rows(audit_notes))
 
     lines.append("")
     return "\n".join(lines)

@@ -108,8 +108,51 @@ def test_report_uses_ascii_section_rules():
 
 def test_report_shows_none_for_empty_sections():
     report = make_audit_report([], [], [])
-    assert report.count("None") == 3
+    assert report.count("None") == 4
     assert "PACKAGE AUDIT REPORT" in report
+
+
+def test_report_uses_special_package_type_instead_of_nan_for_open_items():
+    entries = [
+        _entry("0101S", "FOOD - #1 - Perishable", audited=False),
+        _entry("0102S", "KEY - #2 - Keys for resident, Alpha P", audited=False),
+        _entry("0103S", "PKG - #3 - Envelope", audited=False),
+        _entry("0104S", "PKG - #4 - Alfa shelf", audited=False),
+    ]
+
+    report = make_audit_report(entries, [], [])
+    open_section = report.split("2. PACKAGE ERRORS")[0]
+
+    assert "0101S | Perishable" in open_section
+    assert "0102S | Keys" in open_section
+    assert "0103S | Envelope" in open_section
+    assert "0104S | Alpha" in open_section
+    assert "NaN" not in open_section
+
+
+def test_audit_notes_appear_at_threshold_with_actionable_counts():
+    entries = [_entry(f"100{index}S", f"UPS - #{index} - TRACK000{index}", False) for index in range(3)]
+    errors = [PackageError(f"200{index}S", "", "PKG", "1234", "error") for index in range(3)]
+    doubles = [DoubleLoggedPackage(f"300{index}S", "", "UPS", "5678") for index in range(3)]
+
+    report = make_audit_report(entries, errors, doubles)
+    notes = report.split("4. AUDIT NOTES")[1]
+
+    assert "3 package errors recorded" in notes
+    assert "3 double-logged packages recorded" in notes
+    assert "3 packages were picked up but not closed out" in notes
+    assert notes.count("Staff should take extra care") == 3
+
+
+def test_audit_notes_stay_empty_below_threshold():
+    entries = [_entry("1001S", "UPS - #1 - TRACK0001", False)]
+    report = make_audit_report(
+        entries,
+        [PackageError("2001S", "", "PKG", "1234", "error")],
+        [DoubleLoggedPackage("3001S", "", "UPS", "5678")],
+    )
+
+    assert report.split("4. AUDIT NOTES")[1].strip("\n=") == "None"
 
 
 def test_failed_report_export_preserves_existing_file(tmp_path, monkeypatch):

@@ -1,40 +1,136 @@
 package com.packageaudit.scanner;
 
 import android.graphics.Rect;
+import androidx.camera.core.ExperimentalGetImage;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
+import com.google.mlkit.vision.barcode.BarcodeScanner;
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions;
+import com.google.mlkit.vision.barcode.BarcodeScanning;
+import com.google.mlkit.vision.barcode.ZoomSuggestionOptions;
+import com.google.mlkit.vision.barcode.common.Barcode;
+import com.google.mlkit.vision.common.InputImage;
 import com.google.zxing.Result;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Processes camera luminance in RAM. No photo creation, storage, uploads, or telemetry. */
-final class BarcodeAnalyzer implements ImageAnalysis.Analyzer {
-    interface Listener { void detected(List<Result> values); }
+/**
+ * Processes camera frames in RAM. Bundled ML Kit is primary; the existing
+ * local ZXing decoder remains as an independent fallback for difficult labels.
+ */
+final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
+    interface Listener { void detected(List<DetectedBarcode> values); }
+
+    interface ZoomListener { boolean zoom(float ratio); }
+
     private final Listener listener;
-    private long lastFrame;
+    private final Executor executor;
+    private final BarcodeScanner scanner;
+    private final AtomicBoolean processing = new AtomicBoolean();
     volatile boolean enabled;
 
-    BarcodeAnalyzer(Listener listener) { this.listener = listener; }
-
-    @Override public void analyze(ImageProxy image) {
-        try {
-            long now = android.os.SystemClock.elapsedRealtime();
-            if (!enabled || now - lastFrame < 180) return;
-            lastFrame = now;
-            Rect crop = image.getCropRect();
-            ImageProxy.PlaneProxy plane = image.getPlanes()[0];
-            ByteBuffer buffer = plane.getBuffer();
-            int width = crop.width(), height = crop.height();
-            byte[] y = new byte[width * height];
-            int base = buffer.position();
-            for (int row = 0; row < height; row++) {
-                int start = base + (crop.top + row) * plane.getRowStride() + crop.left * plane.getPixelStride();
-                for (int col = 0; col < width; col++) y[row * width + col] = buffer.get(start + col * plane.getPixelStride());
-            }
-            listener.detected(BarcodeDecoder.read(y, width, height));
-        } catch (RuntimeException error) {
-            listener.detected(Collections.emptyList());
-        } finally { image.close(); }
+    BarcodeAnalyzer(Executor executor, Listener listener, ZoomListener zoomListener) {
+        this.executor = executor;
+        ZoomSuggestionOptions zoom = new ZoomSuggestionOptions.Builder(zoomListener::zoom)
+            .setMaxSupportedZoomRatio(3.0f)
+            .build();
+        BarcodeScannerOptions options = new BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(
+                Barcode.FORMAT_CODE_128,
+                Barcode.FORMAT_CODE_39,
+                Barcode.FORMAT_CODE_93,
+                Barcode.FORMAT_CODABAR,
+                Barcode.FORMAT_ITF,
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_DATA_MATRIX,
+                Barcode.FORMAT_PDF417,
+                Barcode.FORMAT_AZTEC
+            )
+            .enableAllPotentialBarcodes()
+            .setZoomSuggestionOptions(zoom)
+            .setExecutor(executor)
+            .build();
+        scanner = BarcodeScanning.getClient(options);
+        this.listener = listener;
     }
 
+    @Override
+    @ExperimentalGetImage
+    public void analyze(ImageProxy image) {
+        if (!enabled || image.getImage() == null || !processing.compareAndSet(false, true)) {
+            image.close();
+            return;
+        }
+        try {
+            InputImage input = InputImage.fromMediaImage(
+                image.getImage(), image.getImageInfo().getRotationDegrees());
+            scanner.process(input).addOnCompleteListener(executor, task -> {
+                try {
+                    List<DetectedBarcode> values = task.isSuccessful()
+                        ? fromMlKit(task.getResult()) : Collections.emptyList();
+                    if (values.isEmpty()) values = fromZxing(image);
+                    listener.detected(values);
+                } catch (RuntimeException error) {
+                    listener.detected(Collections.emptyList());
+                } finally {
+                    processing.set(false);
+                    image.close();
+                }
+            });
+        } catch (RuntimeException error) {
+            processing.set(false);
+            image.close();
+            listener.detected(Collections.emptyList());
+        }
+    }
+
+    private static List<DetectedBarcode> fromMlKit(List<Barcode> barcodes) {
+        List<DetectedBarcode> values = new ArrayList<>();
+        for (Barcode barcode : barcodes) {
+            String raw = barcode.getRawValue();
+            if (raw != null && !raw.trim().isEmpty())
+                values.add(new DetectedBarcode(raw.trim(), formatName(barcode.getFormat())));
+        }
+        return values;
+    }
+
+    private static List<DetectedBarcode> fromZxing(ImageProxy image) {
+        Rect crop = image.getCropRect();
+        ImageProxy.PlaneProxy plane = image.getPlanes()[0];
+        ByteBuffer buffer = plane.getBuffer();
+        int width = crop.width(), height = crop.height();
+        byte[] y = new byte[width * height];
+        int base = buffer.position();
+        for (int row = 0; row < height; row++) {
+            int start = base + (crop.top + row) * plane.getRowStride()
+                + crop.left * plane.getPixelStride();
+            for (int col = 0; col < width; col++)
+                y[row * width + col] = buffer.get(start + col * plane.getPixelStride());
+        }
+        List<DetectedBarcode> values = new ArrayList<>();
+        for (Result result : BarcodeDecoder.read(y, width, height))
+            values.add(new DetectedBarcode(result.getText().trim(), result.getBarcodeFormat().toString()));
+        return values;
+    }
+
+    private static String formatName(int format) {
+        switch (format) {
+            case Barcode.FORMAT_CODE_128: return "CODE_128";
+            case Barcode.FORMAT_CODE_39: return "CODE_39";
+            case Barcode.FORMAT_CODE_93: return "CODE_93";
+            case Barcode.FORMAT_CODABAR: return "CODABAR";
+            case Barcode.FORMAT_ITF: return "ITF";
+            case Barcode.FORMAT_QR_CODE: return "QR_CODE";
+            case Barcode.FORMAT_DATA_MATRIX: return "DATA_MATRIX";
+            case Barcode.FORMAT_PDF417: return "PDF_417";
+            case Barcode.FORMAT_AZTEC: return "AZTEC";
+            default: return "UNKNOWN";
+        }
+    }
+
+    @Override public void close() { scanner.close(); }
 }

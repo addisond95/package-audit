@@ -9,6 +9,50 @@ import subprocess  # nosec B404 -- fixed build tools, argv lists, shell disabled
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+REQUIRED_PERMISSIONS = {
+    "android.permission.BLUETOOTH_CONNECT",
+    "android.permission.BLUETOOTH_SCAN",
+    "android.permission.CAMERA",
+}
+FORBIDDEN_PERMISSIONS = {
+    "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.INTERNET",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.RECORD_AUDIO",
+}
+
+
+def validate_permissions(permissions: set[str]) -> None:
+    """Validate the final merged permission set, independent of build tooling."""
+    forbidden = permissions & FORBIDDEN_PERMISSIONS
+    missing = REQUIRED_PERMISSIONS - permissions
+    if forbidden or missing:
+        raise SystemExit(f"Unsafe APK permissions: forbidden={sorted(forbidden)}, missing={sorted(missing)}")
+
+
+def verify_permissions(apk: Path, environment: dict[str, str]) -> None:
+    """Fail release creation if merged dependency manifests widen data access."""
+    android_home = environment.get("ANDROID_HOME") or environment.get("ANDROID_SDK_ROOT")
+    if not android_home:
+        raise SystemExit("Set ANDROID_HOME so the final APK permissions can be verified.")
+    tools = sorted((Path(android_home) / "build-tools").glob("*/aapt"), reverse=True)
+    if not tools:
+        raise SystemExit("Android Build Tools must include aapt for APK permission verification.")
+    completed = subprocess.run(  # nosec B603 -- SDK aapt, fixed argv, no shell
+        [str(tools[0]), "dump", "permissions", str(apk)],
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    permissions = {
+        line.split("name='", 1)[1].split("'", 1)[0]
+        for line in completed.stdout.splitlines()
+        if "uses-permission: name='" in line
+    }
+    validate_permissions(permissions)
 
 
 def build() -> None:
@@ -73,9 +117,11 @@ def build() -> None:
         env=environment,
         check=True,
     )
-    destination = ROOT / "dist/PackageAuditScanner-0.9.0.apk"
+    built_apk = ROOT / "android/app/build/outputs/apk/release/app-release.apk"
+    verify_permissions(built_apk, environment)
+    destination = ROOT / "dist/PackageAuditScanner-0.10.0.apk"
     destination.parent.mkdir(exist_ok=True)
-    shutil.copy2(ROOT / "android/app/build/outputs/apk/release/app-release.apk", destination)
+    shutil.copy2(built_apk, destination)
     print(f"APK ready: {destination}")
     print("Keep .signing/ private and back it up securely; future updates need this key.")
 
