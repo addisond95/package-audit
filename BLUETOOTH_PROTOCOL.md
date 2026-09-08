@@ -2,14 +2,15 @@
 
 ## Components and data boundaries
 
-Android CameraX supplies in-memory luminance frames to bundled ZXing. Stable decoded barcode sets go to
-the Mac; images do not. The Java BLE central connects to a Swift CoreBluetooth peripheral. The helper
+Android CameraX supplies in-memory frames to bundled ML Kit barcode/text recognizers, with ZXing as an
+independent barcode fallback. Stable decoded barcode sets plus normalized unit candidates/confidences go to
+the Mac; images and resident names do not. The Java BLE central connects to a Swift CoreBluetooth peripheral. The helper
 only frames bytes and sends newline-delimited JSON over private QProcess stdin/stdout. Python authenticates,
 decrypts, calls the existing tracking matcher, and persists actions on the Qt thread before acknowledging saves.
 No web server or Cloudflare tunnel starts in Bluetooth mode.
 
 The app requests Camera, Nearby devices (BLE scan/connect), and vibration permissions. It has no INTERNET,
-storage, location, microphone, analytics, or remotely downloaded barcode-model dependency. Camera frames,
+storage, location, microphone, analytics, or remotely downloaded vision-model dependency. Camera frames,
 pairing credentials, and pending messages are held in RAM. Android backup is disabled and data extraction
 rules exclude app data; screenshots/recents previews are blocked with FLAG_SECURE. Audit records remain in
 the existing Mac SQLite database. Bluetooth mode does not log packet contents or pairing keys.
@@ -54,11 +55,13 @@ protection provided by the encrypted link. Stop/restart the scanner if the QR ma
 ## Requests, saves, and retries
 
 Encrypted requests include `id` (a UUID, maximum 64 characters) and `op`. Operations are `status`, `scan`
-(aligned `barcodes`/`formats`, at most eight), `confirm` (`scan_id`, `item_id`), `not_found`, `flag_review`,
-`reject`, and `undo` (`scan_id`). The two flag operations preserve unmatched-tracking and known-unit-mismatch
-alerts for desktop review without marking the audit row present.
+(aligned `barcodes`/`formats`, at most eight, plus optional aligned `units`/`unit_confidences`, at most twelve),
+`confirm` (`scan_id`, `item_id`), `not_found`, `flag_review`, `reject`, and `undo` (`scan_id`). Omitting `units`
+is an intentional tracking-only scan. The two flag operations preserve unmatched-tracking and unit-review
+alerts without marking the audit row present. Native unit outcomes include `verified`, `unit_not_read`, and
+`unit_mismatch`; an unreadable unit can still be confirmed manually by the operator.
 Responses contain the same id, `ok`, and either `result` or `error`. Audit results reuse the existing scanner
-schema, including logged unit and tracking-only candidates, with `saved` and `progress` added. `confirm`
+schema, including logged/scanned units and exact tracking candidates, with `saved` and `progress` added. `confirm`
 is only a suggestion; `matched` with `saved:true` acknowledges a confirmed and persisted row.
 
 Python drains the action queue synchronously and verifies saved SQLite state/event status before responding.

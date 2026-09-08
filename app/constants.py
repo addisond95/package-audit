@@ -44,9 +44,21 @@ DEFAULT_ERROR_TEMPLATES = (
     "Wrong storage location",
     "Wrong carrier",
     "Wrong tracking number",
+    "Unit number unreadable — investigated",
     "Package damaged",
     "Other — see notes",
 )
+
+#: Percentage/score metrics available to user-defined final audit note rules.
+AUDIT_NOTE_METRICS = (
+    ("quality_score", "Quality score"),
+    ("completion_rate", "Completed-unit rate"),
+    ("open_unit_rate", "Units with unclosed packages"),
+    ("error_unit_rate", "Units with package errors"),
+    ("duplicate_unit_rate", "Units with duplicate logs"),
+    ("affected_unit_rate", "Units affected by any issue"),
+)
+AUDIT_NOTE_OPERATORS = (">=", ">", "<=", "<", "==")
 
 #: Canonical carrier codes used in the manual report tables.
 CARRIERS = ["USPS", "UPS", "FEDEX", "AMZ", "ONTRAC", "DHL", "PKG", "KEY", "FOOD", "RX"]

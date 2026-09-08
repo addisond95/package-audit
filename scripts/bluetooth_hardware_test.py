@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtCore import Qt, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 import app.main_window as main_window  # noqa: E402
@@ -61,11 +61,14 @@ def main() -> None:
         instructions = QLabel(
             "HARDWARE TEST\n"
             "1. On the phone, scan the large pairing QR above.\n"
-            "2. When connected, tap Scan packages.\n"
-            "3. Point the phone at the TEST TRACKING QR below.\n"
-            f"4. Verify the phone shows Unit {UNIT}, then confirm it."
+            "2. Keep Mode: Tracking + unit selected, then tap Scan packages.\n"
+            "3. Fit both TEST UNIT and TEST TRACKING QR below in the phone preview.\n"
+            f"4. Verify the phone says tracking and unit 1701 match audit unit {UNIT}, then confirm."
         )
         instructions.setWordWrap(True)
+        unit_label = QLabel("APT 1701")
+        unit_label.setStyleSheet("font-size: 44px; font-weight: 800; color: #17212b;")
+        unit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tracking_label = QLabel(f"Test tracking: {TRACKING}")
         tracking_qr = QLabel()
         tracking_qr.setPixmap(ScannerPairingDialog._qr_pixmap(TRACKING))
@@ -73,6 +76,7 @@ def main() -> None:
         result.setWordWrap(True)
         layout = scanner.dialog.layout()
         layout.addWidget(instructions)
+        layout.addWidget(unit_label)
         layout.addWidget(tracking_label)
         layout.addWidget(tracking_qr)
         layout.addWidget(result)
@@ -82,14 +86,19 @@ def main() -> None:
             if window.db.load_state(AUDIT_ID).get(ITEM_ID):
                 events = window.db.load_scanner_events(AUDIT_ID)
                 matched = [event for event in events if event.status == "matched"]
-                if len(matched) == 1:
+                if len(matched) == 1 and matched[0].details.get("unit_status") == "verified":
                     result.setText(
-                        "PASS — the S24 camera decoded the tracking QR, the encrypted Bluetooth link "
-                        "returned the correct unit, and the Mac saved exactly one successful confirmation."
+                        "PASS — the S24 decoded tracking and unit 1701, the Mac matched them to unit "
+                        f"{UNIT}, and the encrypted link saved exactly one confirmation."
                     )
                     result.setStyleSheet("color: #176b4d; font-weight: 700;")
                     print("bluetooth-hardware-test-pass", flush=True)
                     timer.stop()
+                elif len(matched) == 1:
+                    result.setText(
+                        "Tracking was saved, but unit OCR was not verified. Undo it and rerun this test in "
+                        "Tracking + unit mode with both APT 1701 and the QR visible."
+                    )
 
         timer = QTimer(window)
         timer.timeout.connect(check_saved)

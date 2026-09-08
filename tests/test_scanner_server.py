@@ -79,6 +79,42 @@ def test_confirmation_queues_match_and_replay_is_idempotent(entries):
     assert coordinator.drain_actions() == []
 
 
+def test_unreadable_unit_can_be_manually_confirmed(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    result = coordinator.process_observation(
+        ScanObservation(barcodes=("1Z999AA10123456784",), unit_scan_attempted=True)
+    )
+    assert result["status"] == "unit_not_read"
+    assert coordinator.drain_actions()[0].kind == "unit_not_read"
+
+    confirmed = coordinator.confirm(result["scan_id"], "one")
+    action = coordinator.drain_actions()[0]
+
+    assert confirmed["status"] == "matched"
+    assert confirmed["unit_status"] == "manually_confirmed"
+    assert action.kind == "match"
+
+
+def test_native_unit_mismatch_queues_an_automatic_alert(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+
+    result = coordinator.process_observation(
+        ScanObservation(
+            barcodes=("1Z999AA10123456784",),
+            unit_candidates=("3005",),
+            unit_confidences=(1.0,),
+            unit_scan_attempted=True,
+        )
+    )
+
+    assert result["status"] == "unit_mismatch"
+    assert result["unit"] == "1701S"
+    assert result["scanned_unit"] == "3005"
+    assert coordinator.drain_actions()[0].kind == "unit_mismatch"
+
+
 def test_known_tracking_can_be_flagged_as_a_unit_mismatch(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)

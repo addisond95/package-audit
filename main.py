@@ -49,7 +49,7 @@ def export_smoke() -> None:
 
         entry.audited = False
         write_audit_report(report_path, [entry], [], [], source_pdf.name)
-        if "1701S | 6784" not in report_path.read_text(encoding="utf-8"):
+        if "1701S | UPS | UNSPECIFIED | 6784" not in report_path.read_text(encoding="utf-8"):
             raise RuntimeError("Audit-report smoke test did not contain the expected package.")
         if spreadsheet_safe_cell("=1+1") != "'=1+1":
             raise RuntimeError("Spreadsheet formula neutralization smoke test failed.")

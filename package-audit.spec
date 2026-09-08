@@ -82,8 +82,8 @@ app = BUNDLE(  # noqa: F821
     bundle_identifier="com.packageaudit.app",
     info_plist={
         "CFBundleDisplayName": "Package Audit",
-        "CFBundleShortVersionString": "0.11.0",
-        "CFBundleVersion": "0.11.0",
+        "CFBundleShortVersionString": "0.12.0",
+        "CFBundleVersion": "0.12.0",
         "NSHighResolutionCapable": True,
         "NSBluetoothAlwaysUsageDescription": "Connect to your offline Android package scanner over Bluetooth.",
         "NSRequiresAquaSystemAppearance": False,

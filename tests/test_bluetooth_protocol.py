@@ -81,6 +81,76 @@ def test_confirmation_retry_after_disconnect_does_not_repeat_mutation(session):
     assert session.coordinator.drain_actions() == []
 
 
+def test_native_scan_sends_unit_candidates_and_verifies_both(session):
+    client = handshake(session)
+    scan = send(
+        session,
+        client,
+        {
+            "id": "unit-scan",
+            "op": "scan",
+            "barcodes": ["1Z999AA10123456784"],
+            "formats": ["CODE_128"],
+            "units": ["1701"],
+            "unit_confidences": [0.75],
+        },
+    )["result"]
+
+    assert scan["status"] == "confirm"
+    assert scan["unit_status"] == "verified"
+    assert scan["scanned_unit"] == "1701"
+
+
+def test_native_unreadable_unit_can_be_confirmed_manually(session):
+    client = handshake(session)
+    scan = send(
+        session,
+        client,
+        {
+            "id": "unreadable",
+            "op": "scan",
+            "barcodes": ["1Z999AA10123456784"],
+            "formats": ["CODE_128"],
+            "units": [],
+            "unit_confidences": [],
+        },
+    )["result"]
+    session.coordinator.drain_actions()
+
+    confirmed = send(
+        session,
+        client,
+        {"id": "manual", "op": "confirm", "scan_id": scan["scan_id"], "item_id": "one"},
+    )["result"]
+
+    assert scan["status"] == "unit_not_read"
+    assert confirmed["status"] == "matched"
+    assert confirmed["unit_status"] == "manually_confirmed"
+
+
+@pytest.mark.parametrize(
+    "units,confidences",
+    [(["1701"], []), (["1701"], [1.5]), ([""], [1.0]), (["1" * 17], [1.0])],
+)
+def test_invalid_unit_payload_is_rejected(session, units, confidences):
+    client = handshake(session)
+    response = send(
+        session,
+        client,
+        {
+            "id": "invalid-unit",
+            "op": "scan",
+            "barcodes": ["1Z999AA10123456784"],
+            "formats": ["CODE_128"],
+            "units": units,
+            "unit_confidences": confidences,
+        },
+    )
+
+    assert response["ok"] is False
+    assert "scan again" in response["error"].lower()
+
+
 def test_phone_can_flag_an_unmatched_tracking_for_desktop_review(session):
     client = handshake(session)
     scan = send(

@@ -89,6 +89,15 @@ def test_special_package_types_replace_nan_in_open_report_reference():
     assert entry.last4 == "NaN"
     assert entry.package_type is PackageType.KEYS
     assert entry.open_report_reference == "Keys"
+    assert entry.report_carrier == "KEY"
+    assert entry.report_location == "ALPHA"
+
+
+def test_regular_open_package_report_fields_include_carrier_location_and_last_four():
+    entry = AuditEntry("package", 0, "2803S", "Resident", "Fedx - #1 - CAGE - 1Z999AA10123456784", "", "")
+    assert entry.report_carrier == "FEDEX"
+    assert entry.report_location == "CAGE"
+    assert entry.open_report_reference == "6784"
 
 
 def test_unit_sort_key_orders_numerically():

@@ -58,6 +58,8 @@ def test_report_lists_unchecked_entries_sorted():
     assert "1010S" not in s1
     # Unchecked entries are ordered numerically by unit.
     assert report.index("0207S") < report.index("3904S")
+    assert "0207S | USPS | UNSPECIFIED | 5193" in report
+    assert "3904S | AMZ | UNSPECIFIED | 2395" in report
 
 
 def test_report_formats_manual_sections_as_delimited_rows():
@@ -124,10 +126,10 @@ def test_report_uses_special_package_type_instead_of_nan_for_open_items():
     report = make_audit_report(entries, [], [])
     open_section = report.split("2. PACKAGE ERRORS")[0]
 
-    assert "0101S | Perishable" in open_section
-    assert "0102S | Keys" in open_section
-    assert "0103S | Envelope" in open_section
-    assert "0104S | Alpha" in open_section
+    assert "0101S | FOOD | PERISHABLES | Perishable" in open_section
+    assert "0102S | KEY | ALPHA | Keys" in open_section
+    assert "0103S | PKG | UNSPECIFIED | Envelope" in open_section
+    assert "0104S | PKG | SHELF | Alpha" in open_section
     assert "NaN" not in open_section
 
 
@@ -139,9 +141,9 @@ def test_audit_notes_use_percentages_and_actionable_breakdown():
     report = make_audit_report(entries, errors, doubles)
     notes = report.split("4. AUDIT NOTES")[1]
 
-    assert "0 of 3 physical packages accounted for (0.0%)" in notes
-    assert "Package errors: 3 of 3 (100.0% of the audit)" in notes
-    assert "Duplicate logs: 3 of 3 (100.0% of the audit)" in notes
+    assert "0 of 3 units have all packages accounted for (0.0%)" in notes
+    assert "Package errors: 3 affected units, 3 records (100.0% of audited units)" in notes
+    assert "Duplicate logs: 3 affected units, 3 records (100.0% of audited units)" in notes
     assert "Error breakdown: error (3)" in notes
     assert "Follow-up:" in notes
 
@@ -168,7 +170,29 @@ def test_duplicate_source_rows_appear_only_once_in_open_packages():
 
     open_section = make_audit_report(entries, [], []).split("2. PACKAGE ERRORS")[0]
 
-    assert open_section.count("1001S | 6784") == 1
+    assert open_section.count("1001S | UPS | UNSPECIFIED | 6784") == 1
+
+
+def test_report_emits_matching_custom_unit_percentage_note():
+    from app.models import AuditNoteRule
+
+    entries = [
+        _entry("1001S", "UPS - #1 - TRACK0001", False),
+        _entry("1001S", "UPS - #2 - TRACK0002", False),
+        _entry("1002S", "UPS - #3 - TRACK0003", True),
+    ]
+    rules = [
+        AuditNoteRule(
+            "Open-package coaching is needed for {affected_units} unit.",
+            "open_unit_rate",
+            ">=",
+            50.0,
+        )
+    ]
+
+    report = make_audit_report(entries, [], [], audit_note_rules=rules)
+
+    assert "Custom rule: Open-package coaching is needed for 1 unit." in report
 
 
 def test_failed_report_export_preserves_existing_file(tmp_path, monkeypatch):

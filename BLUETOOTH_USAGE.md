@@ -7,7 +7,7 @@ the cable is not needed for audits. Android 12 or newer and a Bluetooth-capable 
 
 ## Install once
 
-The locally built installer is `dist/PackageAuditScanner-0.11.0.apk`. Keep the matching Mac version (0.11.0).
+The locally built installer is `dist/PackageAuditScanner-0.12.0.apk`. Keep the matching Mac version (0.12.0).
 
 1. On the Samsung, enable Developer options by tapping **Settings → About phone → Software information →
    Build number** seven times, then enable **USB debugging** in Developer options.
@@ -20,7 +20,7 @@ The locally built installer is `dist/PackageAuditScanner-0.11.0.apk`. Keep the m
    ```bash
    cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
    adb devices -l
-   adb install -r dist/PackageAuditScanner-0.11.0.apk
+   adb install -r dist/PackageAuditScanner-0.12.0.apk
    ```
 
    The device must say `device`, not `unauthorized`. A blank list means USB debugging or the data connection
@@ -52,28 +52,33 @@ prevents idle Mac sleep for the life of the app. Leave the Mac lid open and keep
    **System Settings → Privacy & Security → Bluetooth** for the app/launcher used to run it.
 3. Wait for **Ready to pair**. Open the Android app, tap **Pair with Mac**, and point at the QR in that dialog.
    This is an app-specific pairing QR, not a website. Do not pair through the system Bluetooth device list.
-4. Wait for **Connected securely • Bluetooth only**, then tap **Scan packages** once.
-5. Fill the camera preview with the package's shipping labels. Keep each barcode and its white margins visible.
-   Tap the preview to focus or use **Flashlight** if needed. The app briefly collects stable carrier barcodes
-   before asking the Mac to check all of them.
-6. The phone shows the audit's logged unit. Check it against the label, then tap **Confirm unit …**.
-   Only confirmation marks the matching audit row checked. Wait for **Saved on Mac**.
+4. Wait for **Connected securely • Bluetooth only**. Leave **Mode: Tracking + unit** selected for normal labels,
+   or tap it to select **Mode: Tracking only** when a label has no useful destination unit. Then tap **Scan
+   packages** once.
+5. In normal mode, keep the tracking barcode and destination unit number visible in the camera preview. Keep
+   barcode white margins visible, tap the preview to focus, or use **Flashlight**. The app briefly collects stable
+   carrier barcodes and reads unit text entirely on the phone before asking the Mac to check them.
+6. If tracking and unit agree, the phone says so and offers confirmation. If no reliable unit is read, compare
+   the audit unit shown on the phone with the physical label and choose manual confirmation, rescan, or review.
+   Tracking-only mode always uses this manual comparison. Only confirmation marks the row checked.
 7. Scanning resumes automatically after the saved acknowledgment. Move to the next box; the same visible
    barcode is suppressed until it leaves the frame or a different barcode is detected.
 8. For an unknown tracking number, choose **Rescan label** or **Flag for end review**. Flagging preserves its
    full tracking number in Mac Alerts without automatically creating a Package Error. Duplicates are also
    retained for review.
-   If tracking matches but the displayed unit is wrong, choose **Flag unit mismatch** instead of confirming.
-   Final review asks for the correct unit and generates the full logged-unit/correct-unit reason automatically.
+   If a clear scanned unit conflicts with the audit, the app automatically warns you and creates a Mac alert
+   containing both values; do not deliver by the audit unit. Final review pre-fills the label unit and generates
+   the full logged-unit/correct-unit reason automatically.
 9. Review every Mac alert, converting genuine issues to Package Errors with a standard reason template or
    dismissing verified non-errors. Export remains locked while alerts are open.
 10. Confirm every physical storage area in the final export checklist, export, then click **Stop Bluetooth
     Scanner**. A new audit or scanner restart needs a fresh pairing QR.
 
-Matching is exact tracking-only; there is no printed-text/name/unit OCR and no last-four-only matching.
-If the PDF contains only a shortened tracking value, the scanner cannot safely infer the full tracking number;
-use the Mac's manual unit search for that package. Wrinkled, damaged, very small, or unsupported barcodes may
-also require manual lookup. Flagged unknown barcodes can be undone or resolved from the Mac Alerts tab.
+Tracking always requires an exact full barcode match; last-four-only matching is never used. Normal mode adds
+on-device unit-number OCR without reading resident names. Numeric identity ignores building suffixes and leading
+zeroes (`2803` matches `2803S`) but does not use partial/fuzzy apartment numbers (`305` does not match `3005`).
+If the PDF contains only a shortened tracking value, use Mac manual search. Wrinkled, damaged, very small, or
+unsupported labels may need rescan, manual confirmation, tracking-only mode, or desktop lookup.
 
 ## Disconnects and safe recovery
 
@@ -101,19 +106,23 @@ cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
 uv run python scripts/bluetooth_hardware_test.py
 ```
 
-This opens a disposable one-package audit, a pairing QR, and a test tracking QR. Follow the instructions in
-the window; a successful confirmation displays `PASS` and writes only to a temporary database that is removed
-when the test closes. Then complete the room/range portions of the checklist below.
+This opens a disposable one-package audit, a pairing QR, `APT 1701`, and a test tracking QR. Keep **Tracking +
+unit** mode selected and fit both test values in view. `PASS` requires a verified unit read—not tracking-only or
+manual fallback—and writes only to a temporary database removed when the test closes. Then complete the
+room/range portions of the checklist below.
 
 1. Unplug USB, turn Wi-Fi and mobile data off on the phone, and leave Bluetooth on on both devices.
-2. Pair and scan a known full tracking barcode. Verify the exact logged unit appears and the Mac row remains
-   unchecked until confirmation. Confirm once and verify **Saved on Mac**, one checked row, and correct totals.
-3. Scan several real label types/orientations and check that the result appears promptly. Verify damaged or
-   ambiguous labels do not mark an arbitrary row.
-4. Scan an unknown tracking barcode and a duplicate test tracking number; check the Mac exception rows and undo.
-5. Interrupt Bluetooth while a confirmation is pending. Restore it and verify the pending operation resolves
+2. Pair and scan a known full tracking barcode plus matching printed unit. Verify both match, the Mac row remains
+   unchecked until confirmation, and **Saved on Mac** appears after one confirmation.
+3. Test `2803` against an audit unit such as `2803S`, then deliberately test a clearly different unit. The first
+   must be confirmable; the second must create an alert containing audit and label units without checking the row.
+4. Obscure the unit while leaving tracking readable. Verify manual confirmation/rescan/review are offered. Test
+   **Mode: Tracking only** separately, and verify it clearly requires manual label comparison.
+5. Scan several real label types/orientations. Verify damaged or ambiguous labels never mark an arbitrary row.
+6. Scan an unknown tracking barcode and a duplicate test tracking number; check Mac alerts and undo.
+7. Interrupt Bluetooth while a confirmation is pending. Restore it and verify the pending operation resolves
    without a second event or falsely reporting a save. Check undo restores the previous audit state.
-6. Background/reopen the phone app, re-pair once while the camera is already open, and test across the actual
+8. Background/reopen the phone app, re-pair once while the camera is already open, and test across the actual
    room with its shelving. Reopen the test PDF to verify checked state persisted.
 
 Do not treat successful compilation or a Mac **Ready to pair** message as evidence this hardware test passed.
@@ -130,7 +139,7 @@ uv run python scripts/build_android.py
 ```
 
 The Gradle wrapper downloads Gradle 8.11.1 on first use. The script runs release unit tests and Android lint,
-builds a signed APK, and copies it to `dist/PackageAuditScanner-0.11.0.apk`. `.signing/` contains the private
+builds a signed APK, and copies it to `dist/PackageAuditScanner-0.12.0.apk`. `.signing/` contains the private
 local update key and password: back it up securely, never commit/share it, and retain it for future updates.
 This is a privately installed build, not a Play Store release or an independently audited security product.
 

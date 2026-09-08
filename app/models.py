@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from app.constants import CARRIER_ALIASES, MISSING_LAST4
+from app.constants import CARRIER_ALIASES, LOCATIONS, MISSING_LAST4
 
 
 class PackageType(str, Enum):
@@ -53,6 +53,33 @@ class AuditEntry:
         if self.package_type is not PackageType.PACKAGE:
             return self.package_type.value
         return normalize_last4(self.last4)
+
+    @property
+    def report_carrier(self) -> str:
+        """Carrier/type label used by the open-package report section."""
+        special = {
+            PackageType.PERISHABLE: "FOOD",
+            PackageType.KEYS: "KEY",
+            PackageType.ENVELOPE: "PKG",
+            PackageType.ALPHA: "PKG",
+        }
+        if self.package_type in special:
+            return special[self.package_type]
+        first = re.split(r"\s+-\s+", self.package, maxsplit=1)[0]
+        return normalize_carrier(first) or "PKG"
+
+    @property
+    def report_location(self) -> str:
+        """Best available storage location for an open package."""
+        upper = self.package.upper()
+        for location in sorted(LOCATIONS, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(location)}\b", upper):
+                return "CAGE" if location == "CG" else location
+        if self.package_type is PackageType.PERISHABLE:
+            return "PERISHABLES"
+        if self.package_type in {PackageType.KEYS, PackageType.ALPHA} and "ALPHA" in upper:
+            return "ALPHA"
+        return "UNSPECIFIED"
 
     @property
     def search_text(self) -> str:
@@ -102,6 +129,7 @@ class ScannerAlert:
     kind: str
     severity: str
     unit: str = ""
+    label_unit: str = ""
     carrier: str = "PKG"
     tracking: str = ""
     last4: str = MISSING_LAST4
@@ -126,6 +154,18 @@ class ScannerEvent:
     message: str = ""
     details: dict[str, Any] | None = None
     created_at: str = ""
+
+
+@dataclass
+class AuditNoteRule:
+    """User-defined note emitted when an audit percentage crosses a threshold."""
+
+    message: str
+    metric: str
+    operator: str
+    threshold: float
+    enabled: bool = True
+    rule_id: int | None = None
 
 
 def normalize_unit(unit: str) -> str:

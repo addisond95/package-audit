@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QTableWidgetItem
 
 import app.main_window as main_window
 from app.export_pdf import HighlightExportResult
-from app.models import AuditEntry, DoubleLoggedPackage, PackageError, ScannerAlert
+from app.models import AuditEntry, AuditNoteRule, DoubleLoggedPackage, PackageError, ScannerAlert
 from app.scanner_matching import ScanDecision, ScanObservation
 from app.scanner_server import ScannerAction
 
@@ -115,6 +115,18 @@ def test_audit_table_shows_inferred_package_type(window):
 
     assert window.table.horizontalHeaderItem(2).text() == "Type"
     assert window.table.item(0, 2).text() == "Keys"
+
+
+def test_audit_note_rule_editor_round_trips_user_defined_condition(window):
+    rule = AuditNoteRule(
+        "Careful: {affected_unit_rate}% of units need review.",
+        "affected_unit_rate",
+        ">=",
+        5.0,
+    )
+    dialog = main_window.AuditNoteRulesDialog([rule], window)
+
+    assert dialog.rules == [rule]
 
 
 def test_csv_export_includes_inferred_package_type(window, tmp_path, monkeypatch):
@@ -460,20 +472,22 @@ def test_scanner_not_found_is_review_alert_not_package_error_and_can_be_undone(w
     assert window.db.load_scanner_alerts("ui-test") == []
 
 
-def test_scanner_unit_only_not_found_creates_only_review_alert(window):
+def test_scanner_unknown_tracking_preserves_scanned_label_unit_in_review_alert(window):
     observation = ScanObservation(carrier="PKG")
     decision = ScanDecision(
         status="not_found",
         confidence=0.75,
         message="Not found",
-        unit="9901S",
+        scanned_units=("9901",),
         carrier="PKG",
         scan_key=observation.scan_key,
     )
 
     window._apply_scanner_action(ScannerAction("scan-unit-only", "not_found", observation, decision))
     assert window.db.load_package_errors("ui-test") == []
-    assert [row.unit for row in window.db.load_scanner_alerts("ui-test")] == ["9901S"]
+    alert = window.db.load_scanner_alerts("ui-test")[0]
+    assert alert.unit == ""
+    assert alert.label_unit == "9901"
 
     window._undo_scanner_action("scan-unit-only")
 
@@ -507,6 +521,78 @@ def test_scanner_unit_mismatch_becomes_review_alert_and_templated_error(window):
 
     window._undo_scanner_action("scan-mislog")
     assert window.db.load_scanner_alerts("ui-test") == []
+
+
+def test_automatic_unit_mismatch_records_audit_and_label_units(window):
+    tracking = "1Z999AA10123456784"
+    observation = ScanObservation(
+        barcodes=(tracking,),
+        unit_candidates=("3005",),
+        unit_confidences=(1.0,),
+        unit_scan_attempted=True,
+        carrier="UPS",
+    )
+    decision = ScanDecision(
+        status="unit_mismatch",
+        confidence=1.0,
+        message="Mismatch",
+        tracking=tracking,
+        unit="305S",
+        carrier="UPS",
+        scan_key=observation.scan_key,
+        related_item_ids=("one",),
+        scanned_units=("3005",),
+        unit_status="mismatch",
+    )
+
+    window._apply_scanner_action(ScannerAction("scan-auto-mislog", "unit_mismatch", observation, decision))
+    alert = window.db.load_scanner_alerts("ui-test", include_resolved=False)[0]
+
+    assert (alert.kind, alert.unit, alert.label_unit, alert.tracking) == (
+        "mislog",
+        "305S",
+        "3005",
+        tracking,
+    )
+    event = window.db.load_scanner_events("ui-test")[0]
+    assert event.details["unit_status"] == "mismatch"
+    assert event.details["scanned_units"] == ["3005"]
+    dialog = main_window.AlertResolutionDialog(alert, window._error_templates(), window)
+    assert dialog.unit.text() == "3005"
+    assert dialog.package_error.note == "Logged for unit 305S but belongs to unit 3005"
+
+
+def test_manual_confirmation_resolves_unit_unreadable_alert(window):
+    tracking = "1Z999AA10123456784"
+    window.entries = [AuditEntry("one", 0, "1701S", "Resident", f"UPS - #1 - {tracking}", "", "")]
+    observation = ScanObservation(barcodes=(tracking,), unit_scan_attempted=True)
+    unreadable = ScanDecision(
+        status="unit_not_read",
+        confidence=0.0,
+        message="Unit unreadable",
+        tracking=tracking,
+        unit="1701S",
+        scan_key=observation.scan_key,
+        related_item_ids=("one",),
+        unit_status="unreadable",
+    )
+    window._apply_scanner_action(ScannerAction("scan-unreadable", "unit_not_read", observation, unreadable))
+    assert len(window.db.load_scanner_alerts("ui-test", include_resolved=False)) == 1
+
+    matched = ScanDecision(
+        status="matched",
+        confidence=1.0,
+        message="Manually confirmed",
+        tracking=tracking,
+        unit="1701S",
+        scan_key=observation.scan_key,
+        related_item_ids=("one",),
+        unit_status="manually_confirmed",
+    )
+    window._apply_scanner_action(ScannerAction("scan-unreadable", "match", observation, matched, "one"))
+
+    assert window.entries[0].audited is True
+    assert window.db.load_scanner_alerts("ui-test", include_resolved=False) == []
 
 
 def test_scanner_duplicate_logs_once_marks_physical_package_and_can_undo_presence(window):

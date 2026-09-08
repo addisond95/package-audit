@@ -81,6 +81,8 @@ class ScannerCoordinator:
         self._scans: dict[str, _StoredScan] = {}
         self._scan_ids_by_key: dict[str, str] = {}
         self._matcher = PackageMatcher([])
+        self._unit_aliases: dict[str, str] = {}
+        self._entries: list[AuditEntry] = []
         self._pdf_hash = ""
         self._alert_summary: dict[str, int] = {}
         self._phone_clients: dict[str, float] = {}
@@ -105,7 +107,8 @@ class ScannerCoordinator:
         reset_scans: bool = False,
     ) -> None:
         with self._lock:
-            self._matcher = PackageMatcher(entries)
+            self._entries = entries
+            self._matcher = PackageMatcher(entries, self._unit_aliases)
             if pdf_hash != self._pdf_hash or reset_scans:
                 self._invalidate_sessions_locked()
             self._pdf_hash = pdf_hash
@@ -129,6 +132,18 @@ class ScannerCoordinator:
     def set_alert_summary(self, summary: dict[str, int]) -> None:
         with self._lock:
             self._alert_summary = dict(summary)
+
+    def set_learning_model(self, model: dict[str, Any] | None) -> None:
+        """Apply only bounded, operator-confirmed unit aliases from local learning data."""
+        raw_aliases = (model or {}).get("unit_aliases", {})
+        aliases = raw_aliases if isinstance(raw_aliases, dict) else {}
+        with self._lock:
+            self._unit_aliases = {
+                str(label)[:16]: str(unit)[:16]
+                for label, unit in list(aliases.items())[:500]
+                if isinstance(label, str) and isinstance(unit, str)
+            }
+            self._matcher = PackageMatcher(self._entries, self._unit_aliases)
 
     def duplicate_groups(self):
         with self._lock:
@@ -235,6 +250,10 @@ class ScannerCoordinator:
                 )
             elif decision.status == "not_found":
                 self._actions.put(ScannerAction(scan_id, "not_found", observation, decision))
+            elif decision.status == "unit_mismatch":
+                self._actions.put(ScannerAction(scan_id, "unit_mismatch", observation, decision))
+            elif decision.status == "unit_not_read":
+                self._actions.put(ScannerAction(scan_id, "unit_not_read", observation, decision))
             elif decision.status == "duplicate":
                 self._actions.put(ScannerAction(scan_id, "duplicate", observation, decision))
             else:
@@ -271,6 +290,8 @@ class ScannerCoordinator:
                 "matched",
                 "not_found",
                 "duplicate",
+                "unit_mismatch",
+                "unit_not_read",
             }
         )
 
@@ -299,7 +320,7 @@ class ScannerCoordinator:
                 if item_id in stored.decision.related_item_ids:
                     return self._response(stored, repeated=True)
                 raise ValueError("That package is not a candidate for this scan.")
-            if stored.decision.status != "confirm":
+            if stored.decision.status not in {"confirm", "unit_not_read"}:
                 raise ValueError("This scan is not waiting for package confirmation.")
             candidate_ids = {candidate.item_id for candidate in stored.decision.candidates}
             if item_id not in candidate_ids:
@@ -323,6 +344,12 @@ class ScannerCoordinator:
                 carrier=stored.decision.carrier,
                 scan_key=stored.decision.scan_key,
                 related_item_ids=(item_id,),
+                scanned_units=stored.decision.scanned_units,
+                unit_status=(
+                    "manually_confirmed"
+                    if stored.decision.status == "unit_not_read"
+                    else stored.decision.unit_status
+                ),
             )
             stored.decision = decision
             stored.rejected = False
@@ -376,7 +403,7 @@ class ScannerCoordinator:
         """Flag a known tracking whose unit does not match the physical label."""
         with self._lock:
             stored = self._require_scan(scan_id)
-            if stored.decision.status == "confirm" and not stored.rejected:
+            if stored.decision.status in {"confirm", "unit_not_read"} and not stored.rejected:
                 if stored.flagged:
                     return self._response(stored, repeated=True)
                 stored.flagged = True
@@ -447,7 +474,7 @@ main{padding:18px}.notice{display:none;border-radius:9px;padding:11px 12px;margi
 .upload-actions{display:grid;grid-template-columns:1fr auto;gap:9px}.upload-actions button,.actions button,.candidate,.notice button{min-height:52px;border-radius:9px;font-size:17px;font-weight:750}.primary{border:0;background:#176b4d;color:white;padding:15px 18px}.secondary{border:1px solid #aeb7c2;background:white;color:#28343f;padding:12px 14px}button:disabled{opacity:.5}.upload-actions input{display:none}
 .live-view{display:none;position:relative;margin:13px 0 9px;border-radius:12px;overflow:hidden;background:#101816;aspect-ratio:4/3}.live-view.show{display:block}.live-view video{width:100%;height:100%;display:block;object-fit:cover}.scan-shade{position:absolute;inset:0;background:linear-gradient(#0008 0 20%,transparent 20% 70%,#0008 70%)}.scan-guide{position:absolute;left:5%;right:5%;top:27%;height:38%;border:3px solid #73d6a2;border-radius:10px;box-shadow:0 0 0 999px #00000018}.scan-line{position:absolute;left:9%;right:9%;top:46%;height:2px;background:#73d6a2;box-shadow:0 0 8px #73d6a2}.live-label{position:absolute;left:10px;right:10px;bottom:10px;padding:8px 10px;border-radius:8px;background:#101816d9;color:white;text-align:center;font-size:13px;font-weight:750}
 .hint{text-align:center;color:#66717d;font-size:13px;line-height:1.4;margin:10px 0 17px}.busy{display:none;text-align:center;padding:25px 10px;color:#4f5d68;font-weight:700}.busy.show{display:block}.spinner{display:inline-block;width:18px;height:18px;border:3px solid #c7d2cd;border-top-color:#176b4d;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-4px;margin-right:7px}@keyframes spin{to{transform:rotate(360deg)}}
-.result{display:none;border:1px solid #d4dae1;border-left:6px solid #64748b;border-radius:10px;padding:16px;outline:none}.result.show{display:block}.result.confirm{border-left-color:#176b4d;background:#effaf5}.result.matched,.result.already_matched{border-left-color:#16845b;background:#effaf5}.result.not_found,.result.flagged{border-left-color:#d92d20;background:#fff3f1}.result.duplicate{border-left-color:#e78b09;background:#fff8e8}.result.poor_scan,.result.rejected{border-left-color:#d9a300;background:#fffbea}.result.undo_queued{border-left-color:#64748b;background:#f4f6f8}.result h2{font-size:19px;line-height:1.25;margin:0 0 8px}.result p{margin:5px 0;color:#4c5864}.unit-number{font-size:42px;font-weight:850;line-height:1;margin:12px 0 8px}.meta{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.meta span{background:#ffffffa8;border-radius:99px;padding:5px 8px;font-size:13px}.candidate{width:100%;text-align:left;border:1px solid #b9c2cc;background:white;padding:12px;margin-top:9px}.candidate strong,.candidate span{display:block}.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}.actions button{flex:1;border:1px solid #aeb7c2;background:white;padding:12px 13px;color:#28343f}.actions .confirm-action{border:0;background:#176b4d;color:white}.actions .danger{color:#b42318;border-color:#e8a49e}.privacy{text-align:center;color:#71808c;font-size:12px;margin:18px 0 0}
+.result{display:none;border:1px solid #d4dae1;border-left:6px solid #64748b;border-radius:10px;padding:16px;outline:none}.result.show{display:block}.result.confirm{border-left-color:#176b4d;background:#effaf5}.result.matched,.result.already_matched{border-left-color:#16845b;background:#effaf5}.result.not_found,.result.flagged,.result.unit_mismatch{border-left-color:#d92d20;background:#fff3f1}.result.duplicate{border-left-color:#e78b09;background:#fff8e8}.result.poor_scan,.result.rejected,.result.unit_not_read{border-left-color:#d9a300;background:#fffbea}.result.undo_queued{border-left-color:#64748b;background:#f4f6f8}.result h2{font-size:19px;line-height:1.25;margin:0 0 8px}.result p{margin:5px 0;color:#4c5864}.unit-number{font-size:42px;font-weight:850;line-height:1;margin:12px 0 8px}.meta{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.meta span{background:#ffffffa8;border-radius:99px;padding:5px 8px;font-size:13px}.candidate{width:100%;text-align:left;border:1px solid #b9c2cc;background:white;padding:12px;margin-top:9px}.candidate strong,.candidate span{display:block}.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}.actions button{flex:1;border:1px solid #aeb7c2;background:white;padding:12px 13px;color:#28343f}.actions .confirm-action{border:0;background:#176b4d;color:white}.actions .danger{color:#b42318;border-color:#e8a49e}.privacy{text-align:center;color:#71808c;font-size:12px;margin:18px 0 0}
 @media(max-width:360px){.upload-actions{grid-template-columns:1fr}.progress-card{align-items:flex-start;flex-direction:column;gap:2px}}@media(prefers-reduced-motion:reduce){.spinner{animation:none}.progress-fill{transition:none}.scan-line{display:none}}
 </style></head><body><div class="shell"><header class="top"><div class="title-row"><h1>Package Scanner</h1><div id="connection" class="connection"><span class="dot"></span><span id="connection-text">Checking desktop…</span></div></div><div class="progress-card"><strong id="progress-text">Loading audit…</strong><span id="remaining-text"></span></div><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><div class="summary" id="summary"></div></header><main><div id="connection-notice" class="notice error" role="alert"></div><div id="capability-notice" class="notice warning"></div><div class="upload-actions"><button id="camera-button" class="primary" type="button">Scan package</button><button id="library-button" class="secondary" type="button">Existing photo</button><input id="camera-image" type="file" accept="image/*" capture="environment"><input id="library-image" type="file" accept="image/*"></div><section id="live-view" class="live-view" aria-label="Live tracking barcode camera"><video id="live-video" autoplay muted playsinline></video><div class="scan-shade"></div><div class="scan-guide"></div><div class="scan-line"></div><div id="live-label" class="live-label">Point the guide at one tracking barcode</div></section><div id="scan-hint" class="hint">Tap Scan package once. The live camera reads the tracking barcode automatically—no picture or Submit step.</div><div id="busy" class="busy" role="status" aria-live="polite"><span class="spinner"></span><span id="busy-text">Reading tracking barcode…</span></div><section id="result" class="result" aria-live="polite" tabindex="-1"></section><p class="privacy">{{ scanner_privacy }}</p></main></div><script>
 const csrf=document.querySelector('meta[name=csrf-token]').content;
@@ -461,10 +488,12 @@ function setConnection(online,message,authEnded=false){desktopOnline=online;cons
 async function api(path,options={},timeoutMs=requestTimeoutMs){options.headers={...(options.headers||{}),'X-CSRF-Token':csrf};const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),timeoutMs);let response;try{response=await fetch(path,{...options,signal:controller.signal})}catch(_error){const error=new Error('Desktop did not respond. Check the phone connection, keep the scanner running, and try again.');error.network=true;throw error}finally{clearTimeout(timeout)}const data=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(data.error||`Request failed (${response.status})`);error.status=response.status;throw error}return data}
 function actionButton(label,action,cls=''){return `<button type="button" class="${cls}" data-action="${action}">${esc(label)}</button>`}
 function bindResultActions(){resultBox.querySelectorAll('[data-candidate]').forEach(button=>button.addEventListener('click',()=>confirmMatch(Number(button.dataset.candidate))));resultBox.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>runAction(button.dataset.action)));updateControls()}
-function render(data){current=data;if(liveActive)livePaused=true;const allowed=['confirm','matched','already_matched','not_found','flagged','duplicate','poor_scan','rejected','undo_queued'];const status=allowed.includes(data.status)?data.status:'poor_scan';const tracking=String(data.tracking||'');resultBox.className=`result show ${status}`;let html=`<h2>${esc(data.message||'Scan complete')}</h2>`;if(status==='confirm'){html+=`<div class="unit-number">${esc(data.unit)}</div><div class="meta"><span>Tracking …${esc(tracking.slice(-4))}</span></div><div class="actions">${actionButton(`Confirm unit ${data.unit}`, 'confirm','confirm-action')}${actionButton('Flag unit mismatch','flag-review')}${actionButton('Wrong barcode — rescan','reject','danger')}</div>`}
+function render(data){current=data;if(liveActive)livePaused=true;const allowed=['confirm','matched','already_matched','not_found','flagged','duplicate','unit_mismatch','unit_not_read','poor_scan','rejected','undo_queued'];const status=allowed.includes(data.status)?data.status:'poor_scan';const tracking=String(data.tracking||'');resultBox.className=`result show ${status}`;let html=`<h2>${esc(data.message||'Scan complete')}</h2>`;if(status==='confirm'){html+=`<div class="unit-number">${esc(data.unit)}</div><div class="meta"><span>Tracking …${esc(tracking.slice(-4))}</span></div><div class="actions">${actionButton(`Confirm unit ${data.unit}`, 'confirm','confirm-action')}${actionButton('Flag unit mismatch','flag-review')}${actionButton('Wrong barcode — rescan','reject','danger')}</div>`}
 else{html+='<div class="meta">';if(data.tracking)html+=`<span>Tracking …${esc(data.tracking.slice(-4))}</span>`;if(data.unit)html+=`<span>Unit ${esc(data.unit)}</span>`;html+='</div>';if(data.repeated)html+='<p>This barcode was already processed; no duplicate action was added.</p>';
 if(status==='already_matched'){html+=`<div class="actions">${actionButton('Scan next package','camera')}${actionButton('Wrong — retake','reject','danger')}</div>`}
 else if(status==='not_found'){html+=`<div class="actions">${actionButton('Flag for end review','not-found','confirm-action')}${actionButton('Rescan label','reject','danger')}</div>`}
+else if(status==='unit_not_read'){html+=`<div class="actions">${actionButton('Flag for end review','flag-review','confirm-action')}${actionButton('Rescan address area','reject','danger')}</div>`}
+else if(status==='unit_mismatch'){html+=`<div class="actions">${actionButton('Scan next package','camera')}${data.can_undo?actionButton('Undo alert','undo'):''}</div>`}
 else if(['matched','flagged','duplicate'].includes(status)){html+=`<div class="actions">${actionButton('Scan next package','camera')}${data.can_undo?actionButton('Undo','undo'):''}${actionButton('Wrong — retake','reject','danger')}</div>`}
 else if(status==='rejected'){html+=`<div class="actions">${actionButton('Scan again','camera')}</div>`}
 else if(status==='poor_scan'){html+=`<div class="actions">${actionButton('Scan again','camera')}</div>`}

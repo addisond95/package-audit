@@ -1,6 +1,6 @@
 """Plain-text audit report generation.
 
-Produces the audit's open-package, error, duplicate, and percentage-based note
+Produces the audit's open-package, error, duplicate, and unit-percentage note
 sections.
 """
 
@@ -10,10 +10,11 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from app.audit_workflow import assess_audit, canonical_audit_entries
+from app.audit_workflow import assess_audit, canonical_audit_entries, triggered_audit_notes
 from app.export_utils import atomic_output_path
 from app.models import (
     AuditEntry,
+    AuditNoteRule,
     DoubleLoggedPackage,
     PackageError,
     normalize_carrier,
@@ -44,6 +45,7 @@ def make_audit_report(
     package_errors: list[PackageError],
     double_logged: list[DoubleLoggedPackage],
     source_pdf_name: str = "",
+    audit_note_rules: list[AuditNoteRule] | None = None,
 ) -> str:
     canonical_entries, _ = canonical_audit_entries(entries)
     unchecked = sorted(
@@ -71,7 +73,15 @@ def make_audit_report(
     lines.append("")
     lines.extend(
         _format_rows(
-            [[normalize_unit(e.unit), e.open_report_reference] for e in unchecked],
+            [
+                [
+                    normalize_unit(e.unit),
+                    e.report_carrier,
+                    e.report_location,
+                    e.open_report_reference,
+                ]
+                for e in unchecked
+            ],
         )
     )
 
@@ -116,20 +126,20 @@ def make_audit_report(
 
     # ── Section 4 ──────────────────────────────────────────────────────────
     assessment = assess_audit(canonical_entries, package_errors, double_logged)
-    reviewed = assessment.total - assessment.not_closed
+    reviewed = assessment.total_units - assessment.not_closed_units
     audit_notes: list[list[str]] = [
         [f"Overall result: {assessment.rating} ({assessment.score:.1f}% quality score)."],
         [
-            f"Completion: {reviewed} of {assessment.total} physical packages accounted for "
+            f"Completion: {reviewed} of {assessment.total_units} units have all packages accounted for "
             f"({assessment.completion_rate:.1f}%)."
         ],
         [
-            f"Package errors: {assessment.errors} of {assessment.total} "
-            f"({assessment.error_rate:.1f}% of the audit)."
+            f"Package errors: {assessment.error_units} affected units, {assessment.error_records} records "
+            f"({assessment.error_rate:.1f}% of audited units)."
         ],
         [
-            f"Duplicate logs: {assessment.double_logs} of {assessment.total} "
-            f"({assessment.duplicate_rate:.1f}% of the audit)."
+            f"Duplicate logs: {assessment.duplicate_units} affected units, "
+            f"{assessment.duplicate_records} records ({assessment.duplicate_rate:.1f}% of audited units)."
         ],
     ]
     if package_errors:
@@ -141,25 +151,29 @@ def make_audit_report(
                 + "."
             ]
         )
-    if assessment.not_closed:
+    if assessment.not_closed_units:
         audit_notes.append(
             [
-                f"Follow-up: resolve the {assessment.not_closed} unclosed physical package"
-                f"{'s' if assessment.not_closed != 1 else ''} and reinforce pickup close-out procedure."
+                f"Follow-up: {assessment.not_closed_units} unit"
+                f"{'s have' if assessment.not_closed_units != 1 else ' has'} "
+                f"{assessment.unclosed_packages} unclosed physical package"
+                f"{'s' if assessment.unclosed_packages != 1 else ''}; reinforce pickup close-out procedure."
             ]
         )
-    if assessment.errors:
+    if assessment.error_units:
         audit_notes.append(
             ["Follow-up: review the categorized package errors below with staff and address repeated causes."]
         )
-    if assessment.double_logs:
+    if assessment.duplicate_units:
         audit_notes.append(
             ["Follow-up: search for an existing tracking entry before relogging incoming packages."]
         )
-    if not (assessment.not_closed or assessment.errors or assessment.double_logs):
+    if not (assessment.not_closed_units or assessment.error_units or assessment.duplicate_units):
         audit_notes.append(
             ["No package exceptions were recorded. Current receiving and close-out practices were effective."]
         )
+    for custom_note in triggered_audit_notes(assessment, audit_note_rules or []):
+        audit_notes.append([f"Custom rule: {custom_note}"])
 
     lines.append("")
     lines.append(_section(4, "AUDIT NOTES"))
@@ -176,12 +190,14 @@ def write_audit_report(
     package_errors: list[PackageError],
     double_logged: list[DoubleLoggedPackage],
     source_pdf_name: str = "",
+    audit_note_rules: list[AuditNoteRule] | None = None,
 ) -> None:
     report = make_audit_report(
         entries=entries,
         package_errors=package_errors,
         double_logged=double_logged,
         source_pdf_name=source_pdf_name,
+        audit_note_rules=audit_note_rules,
     )
     with atomic_output_path(output_path) as temporary_path:
         temporary_path.write_text(report, encoding="utf-8")

@@ -10,6 +10,7 @@ from typing import Any
 
 from app.constants import MISSING_LAST4
 from app.models import AuditEntry, normalize_unit
+from app.unit_matching import UnitResolver
 
 _CODE_RE = re.compile(r"[A-Z0-9]{7,40}", re.IGNORECASE)
 _LOCATION_WORDS = {
@@ -90,11 +91,14 @@ def entry_tracking_values(package_text: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class ScanObservation:
-    """Tracking barcodes decoded from one phone image."""
+    """Tracking barcodes and privacy-safe on-device unit readings."""
 
     barcodes: tuple[str, ...] = ()
     carrier: str = "PKG"
     barcode_formats: tuple[str, ...] = ()
+    unit_candidates: tuple[str, ...] = ()
+    unit_confidences: tuple[float, ...] = ()
+    unit_scan_attempted: bool = False
 
     @property
     def barcode_trackings(self) -> tuple[str, ...]:
@@ -129,7 +133,14 @@ class ScanObservation:
 
     @property
     def scan_key(self) -> str:
-        payload = json.dumps(sorted(set(self.barcodes)), separators=(",", ":"))
+        payload = json.dumps(
+            {
+                "barcodes": sorted(set(self.barcodes)),
+                "units": sorted(set(self.unit_candidates)),
+                "unit_scan": self.unit_scan_attempted,
+            },
+            separators=(",", ":"),
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
@@ -183,6 +194,8 @@ class ScanDecision:
     carrier: str = "PKG"
     scan_key: str = ""
     related_item_ids: tuple[str, ...] = ()
+    scanned_units: tuple[str, ...] = ()
+    unit_status: str = "not_attempted"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -195,14 +208,18 @@ class ScanDecision:
             "carrier": self.carrier,
             "scan_key": self.scan_key,
             "related_item_ids": list(self.related_item_ids),
+            "scanned_units": list(self.scanned_units),
+            "scanned_unit": self.scanned_units[0] if self.scanned_units else "",
+            "unit_status": self.unit_status,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
 
 
 class PackageMatcher:
-    """Look up decoded tracking numbers exactly; no OCR or fuzzy matching."""
+    """Require exact tracking and, for native scans, compatible unit identity."""
 
-    def __init__(self, entries: list[AuditEntry]) -> None:
+    def __init__(self, entries: list[AuditEntry], unit_aliases: dict[str, str] | None = None) -> None:
+        self.unit_resolver = UnitResolver(unit_aliases)
         self.records = [AuditMatchRecord.from_entry(entry) for entry in entries]
         self.records_by_id = {record.item_id: record for record in self.records}
         self.physical_records: list[AuditMatchRecord] = []
@@ -256,6 +273,8 @@ class PackageMatcher:
                 carrier=observation.carrier,
                 scan_key=observation.scan_key,
                 related_item_ids=tuple(record.item_id for record in records),
+                scanned_units=observation.unit_candidates,
+                unit_status="duplicate",
             )
 
         matched: dict[str, tuple[AuditMatchRecord, str]] = {}
@@ -277,13 +296,61 @@ class PackageMatcher:
             record, tracking = next(iter(matched.values()))
             candidate = self._candidate(record, tracking)
             already_audited = record.audited
+            if observation.unit_scan_attempted:
+                verification = self.unit_resolver.verify(
+                    record.unit,
+                    observation.unit_candidates,
+                    observation.unit_confidences,
+                )
+                if verification.status == "mismatch":
+                    label_units = ", ".join(verification.scanned_units)
+                    return ScanDecision(
+                        status="unit_mismatch",
+                        confidence=1.0,
+                        message=(
+                            f"Investigate this package: tracking is logged for unit {record.unit}, "
+                            f"but the label appears to show {label_units}."
+                        ),
+                        candidates=(candidate,),
+                        tracking=tracking,
+                        unit=record.unit,
+                        carrier=observation.carrier,
+                        scan_key=observation.scan_key,
+                        related_item_ids=(record.item_id,),
+                        scanned_units=verification.scanned_units,
+                        unit_status="mismatch",
+                    )
+                if verification.status == "unreadable":
+                    return ScanDecision(
+                        status="unit_not_read",
+                        confidence=0.0,
+                        message=(
+                            f"Tracking matches unit {record.unit}, but the label unit could not be "
+                            "verified. Rescan the address area or flag it for review."
+                        ),
+                        candidates=(candidate,),
+                        tracking=tracking,
+                        unit=record.unit,
+                        carrier=observation.carrier,
+                        scan_key=observation.scan_key,
+                        related_item_ids=(record.item_id,),
+                        scanned_units=verification.scanned_units,
+                        unit_status="unreadable",
+                    )
+                scanned_units = verification.scanned_units
+                unit_status = "verified"
+                unit_message = (
+                    f"Tracking and label unit {verification.matched_reading} match audit unit {record.unit}."
+                )
+            else:
+                scanned_units = ()
+                unit_status = "not_attempted"
+                unit_message = f"Audit lookup: unit {record.unit}. Confirm it against the label."
             return ScanDecision(
                 status="already_matched" if already_audited else "confirm",
                 confidence=1.0,
                 message=(
-                    f"Unit {record.unit} is already marked present."
-                    if already_audited
-                    else f"Audit lookup: unit {record.unit}. Confirm it against the label."
+                    f"Unit {record.unit} is already marked present." if already_audited else unit_message
                 ),
                 candidates=(candidate,),
                 tracking=tracking,
@@ -291,6 +358,8 @@ class PackageMatcher:
                 carrier=observation.carrier,
                 scan_key=observation.scan_key,
                 related_item_ids=(record.item_id,),
+                scanned_units=scanned_units,
+                unit_status=unit_status,
             )
 
         reliable = observation.reliable_barcode_trackings
@@ -306,6 +375,8 @@ class PackageMatcher:
                 tracking=tracking,
                 carrier=observation.carrier,
                 scan_key=observation.scan_key,
+                scanned_units=observation.unit_candidates,
+                unit_status=("unmatched" if observation.unit_scan_attempted else "not_attempted"),
             )
 
         message = (

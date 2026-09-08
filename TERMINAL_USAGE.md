@@ -60,8 +60,10 @@ The original PDF is never overwritten by a highlighted-PDF export.
 3. Open an audit PDF on the Mac and click **Bluetooth Phone Scanner**. Allow Bluetooth permission if prompted.
 4. In the Android app, tap **Pair with Mac** and scan that window's QR code. Do not use the Samsung camera app
    or the macOS Bluetooth pairing screen; pairing happens inside Package Audit.
-5. Once connected, tap **Scan packages** and point at one tracking barcode. Check the displayed unit and tap
-   **Confirm unit**. Wait for **Saved on Mac**; scanning resumes automatically for the next package.
+5. Once connected, leave **Mode: Tracking + unit** selected, tap **Scan packages**, and keep the tracking barcode
+   plus destination unit visible. A compatible numeric unit (`2803` for audit unit `2803S`) is verified before
+   confirmation. A clear conflict becomes an alert; an unreadable unit can be manually confirmed or rescanned.
+   Use **Mode: Tracking only** for labels without useful unit text and compare the displayed audit unit manually.
 6. Keep the Mac awake and nearby. To prevent idle sleep for this run, launch with
    `caffeinate -i uv run package-audit`. Keep the phone scanner in the foreground.
 
@@ -83,8 +85,9 @@ Stop the scanner on the Mac when finished. Opening a different audit requires a 
 7. The phone displays the unit logged for that exact tracking number. Check the unit against the box label,
    then tap **Confirm unit …** to mark it present. Tap **Wrong barcode — rescan** if the wrong barcode was read,
    or **Scan next package** to resume the already-open live camera.
-8. A readable tracking number absent from the audit is recorded automatically under **Package Errors** as
-   `Not logged`. A duplicate audit tracking number is flagged for investigation. Use **Undo** if needed.
+8. A readable tracking number absent from the audit is held in **Alerts** for rescan, dismissal, or conversion
+   to a categorized Package Error. A duplicate audit tracking number is flagged for investigation. Use **Undo**
+   if needed.
 
 The pairing code accepts new phones for 15 minutes. A phone that is already paired stays connected until the
 scanner stops or a different audit is loaded. Tracking values and fallback camera images are processed in memory
@@ -147,9 +150,9 @@ If Remote mode does not start:
 If the page opens but scans fail, keep the app running, use a sharp well-lit image, fill the frame with only
 the tracking barcode, and check that the pairing window says **Tracking barcode scanner: Ready**.
 
-If a scan times out, confirm that the phone still says **Desktop connected**, keep both devices awake, and move
-closer to the Wi-Fi access point. The tracking-only decoder normally returns promptly because it does not run
-printed-text OCR.
+If a browser scan times out, confirm that the phone still says **Desktop connected**, keep both devices awake,
+and move closer to the Wi-Fi access point. Browser mode remains tracking-only and does not provide the native
+Android app's unit-number verification.
 
 ## Verify the project from Terminal
 

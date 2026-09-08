@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.audit_dialogs import AlertResolutionDialog, AuditAreaChecklistDialog
+from app.audit_dialogs import AlertResolutionDialog, AuditAreaChecklistDialog, AuditNoteRulesDialog
 from app.audit_report import write_audit_report
 from app.bluetooth_scanner import BluetoothPairingDialog, BluetoothScanner
 from app.constants import (
@@ -69,6 +69,7 @@ from app.models import (
     resolve_last4,
 )
 from app.parser import file_hash, parse_buildinglink_pdf
+from app.scanner_learning import learning_features, update_learning_model
 from app.scanner_server import ScannerAction, ScannerCoordinator, ScannerServer
 from app.scanner_ui import ScannerPairingDialog
 from app.scanner_vision import scanner_capabilities
@@ -77,7 +78,17 @@ from app.theme import build_stylesheet
 AUDIT_HEADERS = ["Done", "Unit", "Type", "Last 4", "Resident", "Package", "Tower", "Timestamp", "Page"]
 ERROR_HEADERS = ["Unit", "Location", "Carrier", "Tracking", "Last 4", "Error Note"]
 DOUBLE_HEADERS = ["Unit", "Location", "Carrier", "Tracking", "Last 4"]
-ALERT_HEADERS = ["Status", "Type", "Unit", "Carrier", "Tracking", "Last 4", "Message", "Time"]
+ALERT_HEADERS = [
+    "Status",
+    "Type",
+    "Audit Unit",
+    "Label Unit",
+    "Carrier",
+    "Tracking",
+    "Last 4",
+    "Message",
+    "Time",
+]
 
 ERROR_COLUMNS = len(ERROR_HEADERS)
 DOUBLE_COLUMNS = len(DOUBLE_HEADERS)
@@ -119,6 +130,7 @@ class PackageAuditApp(QMainWindow):
         self.highlight_color = QColor(*DEFAULT_HIGHLIGHT_RGBA)
         self.loading_manual_tables = False
         self.scanner_coordinator = ScannerCoordinator()
+        self.scanner_coordinator.set_learning_model(self.db.load_scanner_model())
         self.scanner_server: ScannerServer | None = None
         self.scanner_dialog: ScannerPairingDialog | None = None
         self.bluetooth_scanner: BluetoothScanner | None = None
@@ -391,9 +403,9 @@ class PackageAuditApp(QMainWindow):
         self.alerts_table.setAlternatingRowColors(True)
         self.alerts_table.verticalHeader().setVisible(False)
         self.alerts_table.verticalHeader().setDefaultSectionSize(36)
-        for column, width in enumerate((80, 110, 80, 90, 210, 75, 500, 150)):
+        for column, width in enumerate((80, 110, 90, 90, 90, 210, 75, 500, 150)):
             self.alerts_table.setColumnWidth(column, width)
-        self.alerts_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.alerts_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
 
         layout.addLayout(buttons)
         layout.addWidget(self.alerts_table)
@@ -405,6 +417,7 @@ class PackageAuditApp(QMainWindow):
         template_row.addWidget(self.error_template_combo, stretch=1)
         self._add_button(template_row, "Add Template", self.add_error_template)
         self._add_button(template_row, "Delete Custom Template", self.delete_error_template, "danger")
+        self._add_button(template_row, "Audit Note Rules…", self.edit_audit_note_rules)
         layout.addLayout(template_row)
         self._refresh_error_templates()
         return tab
@@ -860,7 +873,16 @@ class PackageAuditApp(QMainWindow):
                 saved.get(item_id) for item_id in result["related_item_ids"]
             ):
                 return False
-        if status in {"matched", "not_found", "flagged", "duplicate", "rejected", "undo_queued"}:
+        if status in {
+            "matched",
+            "not_found",
+            "flagged",
+            "duplicate",
+            "unit_mismatch",
+            "unit_not_read",
+            "rejected",
+            "undo_queued",
+        }:
             expected = "undone" if status == "undo_queued" else status
             row = self.db.conn.execute(
                 "SELECT status FROM scanner_events WHERE pdf_hash = ? AND scan_id = ?",
@@ -1036,6 +1058,7 @@ class PackageAuditApp(QMainWindow):
             return
         if action.kind == "undo":
             self._undo_scanner_action(action.scan_id)
+            self._record_scanner_learning(action, "undone")
             return
         if action.kind == "reject":
             self._undo_scanner_action(action.scan_id, save_event=False)
@@ -1051,11 +1074,17 @@ class PackageAuditApp(QMainWindow):
                 self.db.set_state(self.pdf_hash, entry.item_id, True)
                 review_key = f"review:{action.scan_id}"
                 self.db.resolve_scanner_alert(self.pdf_hash, review_key)
+                if action.decision.tracking:
+                    self.db.resolve_scanner_alert(
+                        self.pdf_hash,
+                        f"unit_unreadable:{normalize_tracking(action.decision.tracking)}",
+                    )
             self._save_scanner_event(action)
             return
 
         if action.kind == "not_found":
             tracking = normalize_tracking(action.decision.tracking)
+            scanned_unit = action.decision.scanned_units[0] if action.decision.scanned_units else ""
             alert_key = f"not_found:{tracking or action.scan_id}"
             existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
             self.db.upsert_scanner_alert(
@@ -1064,13 +1093,14 @@ class PackageAuditApp(QMainWindow):
                     alert_key=alert_key,
                     kind="unmatched",
                     severity="review",
-                    unit=action.decision.unit,
+                    label_unit=scanned_unit,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
                     message=(
-                        "Tracking was not found in the loaded audit. Rescan/dismiss it or add a "
-                        "categorized package error before export."
+                        "Tracking was not found in the loaded audit"
+                        + (f"; the label appears to show unit {scanned_unit}" if scanned_unit else "")
+                        + ". Rescan/dismiss it or add a categorized package error before export."
                     ),
                 ),
             )
@@ -1082,6 +1112,7 @@ class PackageAuditApp(QMainWindow):
 
         if action.kind == "flag_error":
             tracking = normalize_tracking(action.decision.tracking)
+            scanned_unit = action.decision.scanned_units[0] if action.decision.scanned_units else ""
             alert_key = f"not_found:{tracking or action.scan_id}"
             self.db.upsert_scanner_alert(
                 self.pdf_hash,
@@ -1089,7 +1120,7 @@ class PackageAuditApp(QMainWindow):
                     alert_key=alert_key,
                     kind="unmatched",
                     severity="error",
-                    unit=action.decision.unit,
+                    label_unit=scanned_unit,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
@@ -1099,8 +1130,36 @@ class PackageAuditApp(QMainWindow):
             self._save_scanner_event(action, status="flagged")
             return
 
-        if action.kind == "flag_review":
+        if action.kind == "unit_not_read":
             tracking = normalize_tracking(action.decision.tracking)
+            alert_key = f"unit_unreadable:{tracking or action.scan_id}"
+            existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="unit_unreadable",
+                    severity="review",
+                    unit=action.decision.unit,
+                    label_unit=(action.decision.scanned_units[0] if action.decision.scanned_units else ""),
+                    carrier=action.decision.carrier,
+                    tracking=tracking,
+                    last4=tracking[-4:] if tracking else "",
+                    message=(
+                        f"Tracking matches audit unit {action.decision.unit}, but the phone could not "
+                        "reliably read a label unit. Rescan or flag for final review."
+                    ),
+                    item_ids=action.decision.related_item_ids,
+                ),
+            )
+            if alert_key not in existing_keys:
+                history["alerts"].append(alert_key)
+            self._save_scanner_event(action)
+            return
+
+        if action.kind == "unit_mismatch":
+            tracking = normalize_tracking(action.decision.tracking)
+            label_units = ", ".join(action.decision.scanned_units) or "unknown"
             alert_key = f"unit_mismatch:{tracking or action.scan_id}"
             existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
             self.db.upsert_scanner_alert(
@@ -1110,12 +1169,50 @@ class PackageAuditApp(QMainWindow):
                     kind="mislog",
                     severity="error",
                     unit=action.decision.unit,
+                    label_unit=(action.decision.scanned_units[0] if action.decision.scanned_units else ""),
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
                     message=(
-                        f"Tracking is logged for unit {action.decision.unit}, but the phone operator "
-                        "flagged a unit mismatch."
+                        f"Tracking is logged for unit {action.decision.unit}, but the label appears "
+                        f"to show {label_units}. Investigate before export."
+                    ),
+                    item_ids=action.decision.related_item_ids,
+                ),
+            )
+            if alert_key not in existing_keys:
+                history["alerts"].append(alert_key)
+            self._save_scanner_event(action)
+            return
+
+        if action.kind == "flag_review":
+            tracking = normalize_tracking(action.decision.tracking)
+            unreadable = action.decision.status == "unit_not_read"
+            alert_key = (
+                f"unit_unreadable:{tracking or action.scan_id}"
+                if unreadable
+                else f"unit_mismatch:{tracking or action.scan_id}"
+            )
+            existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="unit_unreadable" if unreadable else "mislog",
+                    severity="error",
+                    unit=action.decision.unit,
+                    label_unit=(action.decision.scanned_units[0] if action.decision.scanned_units else ""),
+                    carrier=action.decision.carrier,
+                    tracking=tracking,
+                    last4=tracking[-4:] if tracking else "",
+                    message=(
+                        f"Unit could not be read for tracking logged to {action.decision.unit}; "
+                        "the phone operator flagged it for final review."
+                        if unreadable
+                        else (
+                            f"Tracking is logged for unit {action.decision.unit}, but the phone "
+                            "operator flagged a unit mismatch."
+                        )
                     ),
                     item_ids=action.decision.related_item_ids,
                 ),
@@ -1201,9 +1298,36 @@ class PackageAuditApp(QMainWindow):
                 last4=action.decision.tracking[-4:] if action.decision.tracking else "",
                 item_id=action.item_id,
                 message=action.decision.message,
-                details={"candidates": candidates},
+                details={
+                    "candidates": candidates,
+                    "unit_status": action.decision.unit_status,
+                    "scanned_units": list(action.decision.scanned_units),
+                },
             ),
         )
+        self._record_scanner_learning(action, status or action.decision.status)
+
+    def _record_scanner_learning(self, action: ScannerAction, outcome: str) -> None:
+        if not self.pdf_hash:
+            return
+        suggested = action.decision.candidates[0].item_id if action.decision.candidates else ""
+        features = learning_features(action.observation, action.decision)
+        self.db.record_scanner_feedback(
+            self.pdf_hash,
+            action.observation.scan_key,
+            outcome,
+            suggested,
+            action.item_id,
+            features,
+        )
+        model = update_learning_model(
+            self.db.load_scanner_model(),
+            action.observation,
+            action.decision,
+            "accepted" if action.kind == "match" else outcome,
+        )
+        self.db.save_scanner_model(model)
+        self.scanner_coordinator.set_learning_model(model)
 
     def _undo_scanner_action(self, scan_id: str, *, save_event: bool = True) -> None:
         if not self.pdf_hash:
@@ -1247,6 +1371,7 @@ class PackageAuditApp(QMainWindow):
                 "Resolved" if alert.resolved else "Open",
                 alert.kind.replace("_", " ").title(),
                 alert.unit,
+                alert.label_unit,
                 alert.carrier,
                 alert.tracking,
                 alert.last4,
@@ -1335,6 +1460,15 @@ class PackageAuditApp(QMainWindow):
         self.db.delete_error_template(message)
         self._refresh_error_templates()
 
+    def edit_audit_note_rules(self) -> None:
+        dialog = AuditNoteRulesDialog(self.db.load_audit_note_rules(), self)
+        if dialog.exec() == QDialog.Accepted:
+            self.db.replace_audit_note_rules(dialog.rules)
+            self.statusBar().showMessage(
+                f"Saved {len(dialog.rules)} audit-note trigger rule{'s' if len(dialog.rules) != 1 else ''}.",
+                5000,
+            )
+
     def review_selected_alerts(self) -> None:
         alerts = self._selected_alerts()
         if not alerts:
@@ -1418,6 +1552,7 @@ class PackageAuditApp(QMainWindow):
                 package_errors=self.collect_error_rows(),
                 double_logged=self.collect_double_rows(),
                 source_pdf_name=self.pdf_path.name if self.pdf_path else "",
+                audit_note_rules=self.db.load_audit_note_rules(),
             )
         except OSError as exc:
             LOGGER.exception("Could not export audit report to %s", path_str)

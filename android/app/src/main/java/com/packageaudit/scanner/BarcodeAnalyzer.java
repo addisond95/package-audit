@@ -10,6 +10,12 @@ import com.google.mlkit.vision.barcode.BarcodeScanning;
 import com.google.mlkit.vision.barcode.ZoomSuggestionOptions;
 import com.google.mlkit.vision.barcode.common.Barcode;
 import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import com.google.android.gms.tasks.Task;
+import com.google.android.gms.tasks.Tasks;
 import com.google.zxing.Result;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -23,13 +29,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * local ZXing decoder remains as an independent fallback for difficult labels.
  */
 final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
-    interface Listener { void detected(List<DetectedBarcode> values); }
+    interface Listener { void detected(List<DetectedBarcode> values, List<DetectedUnit> units); }
 
     interface ZoomListener { boolean zoom(float ratio); }
 
     private final Listener listener;
     private final Executor executor;
     private final BarcodeScanner scanner;
+    private final TextRecognizer textRecognizer;
     private final AtomicBoolean processing = new AtomicBoolean();
     volatile boolean enabled;
 
@@ -55,6 +62,7 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
             .setExecutor(executor)
             .build();
         scanner = BarcodeScanning.getClient(options);
+        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         this.listener = listener;
     }
 
@@ -68,14 +76,18 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
         try {
             InputImage input = InputImage.fromMediaImage(
                 image.getImage(), image.getImageInfo().getRotationDegrees());
-            scanner.process(input).addOnCompleteListener(executor, task -> {
+            Task<List<Barcode>> barcodeTask = scanner.process(input);
+            Task<Text> textTask = textRecognizer.process(input);
+            Tasks.whenAllComplete(barcodeTask, textTask).addOnCompleteListener(executor, ignored -> {
                 try {
-                    List<DetectedBarcode> values = task.isSuccessful()
-                        ? fromMlKit(task.getResult()) : Collections.emptyList();
+                    List<DetectedBarcode> values = barcodeTask.isSuccessful()
+                        ? fromMlKit(barcodeTask.getResult()) : Collections.emptyList();
                     if (values.isEmpty()) values = fromZxing(image);
-                    listener.detected(values);
+                    List<DetectedUnit> units = textTask.isSuccessful()
+                        ? fromText(textTask.getResult()) : Collections.emptyList();
+                    listener.detected(values, units);
                 } catch (RuntimeException error) {
-                    listener.detected(Collections.emptyList());
+                    listener.detected(Collections.emptyList(), Collections.emptyList());
                 } finally {
                     processing.set(false);
                     image.close();
@@ -84,7 +96,7 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
         } catch (RuntimeException error) {
             processing.set(false);
             image.close();
-            listener.detected(Collections.emptyList());
+            listener.detected(Collections.emptyList(), Collections.emptyList());
         }
     }
 
@@ -117,6 +129,13 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
         return values;
     }
 
+    private static List<DetectedUnit> fromText(Text text) {
+        List<String> lines = new ArrayList<>();
+        for (Text.TextBlock block : text.getTextBlocks())
+            for (Text.Line line : block.getLines()) lines.add(line.getText());
+        return UnitExtractor.extract(lines);
+    }
+
     private static String formatName(int format) {
         switch (format) {
             case Barcode.FORMAT_CODE_128: return "CODE_128";
@@ -132,5 +151,5 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
         }
     }
 
-    @Override public void close() { scanner.close(); }
+    @Override public void close() { scanner.close(); textRecognizer.close(); }
 }

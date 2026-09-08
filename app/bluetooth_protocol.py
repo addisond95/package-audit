@@ -138,6 +138,8 @@ class ScannerBluetoothSession:
             return self.coordinator.status()
         if op == "scan":
             codes, formats = request.get("barcodes"), request.get("formats")
+            units = request.get("units", [])
+            unit_confidences = request.get("unit_confidences", [])
             if (
                 not isinstance(codes, list)
                 or not 1 <= len(codes) <= 8
@@ -145,10 +147,27 @@ class ScannerBluetoothSession:
                 or not isinstance(formats, list)
                 or len(formats) != len(codes)
                 or any(not isinstance(fmt, str) or not 1 <= len(fmt) <= 64 for fmt in formats)
+                or not isinstance(units, list)
+                or len(units) > 12
+                or any(not isinstance(unit, str) or not 1 <= len(unit) <= 16 for unit in units)
+                or not isinstance(unit_confidences, list)
+                or len(unit_confidences) != len(units)
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not 0.0 <= float(value) <= 1.0
+                    for value in unit_confidences
+                )
             ):
                 raise ValueError("Invalid tracking barcode. Scan again.")
             result = self.coordinator.process_observation(
-                observation_from_barcodes(tuple(codes), tuple(formats)),
+                observation_from_barcodes(
+                    tuple(codes),
+                    tuple(formats),
+                    tuple(units),
+                    tuple(float(value) for value in unit_confidences),
+                    unit_scan_attempted="units" in request,
+                ),
                 expected_generation=self.generation,
             )
         else:

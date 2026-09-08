@@ -8,7 +8,7 @@ import sqlite3
 import pytest
 
 from app.database import AuditDatabase
-from app.models import DoubleLoggedPackage, PackageError, ScannerAlert, ScannerEvent
+from app.models import AuditNoteRule, DoubleLoggedPackage, PackageError, ScannerAlert, ScannerEvent
 
 
 @pytest.fixture()
@@ -59,6 +59,17 @@ def test_area_checks_and_custom_error_templates_round_trip(db):
     assert db.load_custom_error_templates() == ["Delivered to wrong tower"]
     db.delete_error_template("Delivered to wrong tower")
     assert db.load_custom_error_templates() == []
+
+
+def test_custom_audit_note_rules_round_trip(db):
+    rules = [
+        AuditNoteRule("Careful: {open_unit_rate}% open.", "open_unit_rate", ">=", 5.0),
+        AuditNoteRule("Disabled", "quality_score", "<", 90.0, enabled=False),
+    ]
+
+    db.replace_audit_note_rules(rules)
+
+    assert db.load_audit_note_rules() == rules
 
 
 def test_package_errors_round_trip_with_normalization(db):
@@ -206,6 +217,7 @@ def test_scanner_alert_upsert_resolution_and_clear(db):
         kind="duplicate",
         severity="warning",
         unit="1701s",
+        label_unit="1701",
         carrier="ups",
         tracking="track1234",
         message="Duplicate tracking",
@@ -217,6 +229,7 @@ def test_scanner_alert_upsert_resolution_and_clear(db):
     alerts = db.load_scanner_alerts("hash-a", include_resolved=False)
     assert len(alerts) == 1
     assert alerts[0].item_ids == ("one", "two")
+    assert alerts[0].label_unit == "1701"
     db.resolve_scanner_alert("hash-a", alert.alert_key)
     assert db.load_scanner_alerts("hash-a", include_resolved=False) == []
     assert db.load_scanner_alerts("hash-a")[0].resolved is True

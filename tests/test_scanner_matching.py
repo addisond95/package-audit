@@ -1,4 +1,4 @@
-"""Tests for exact tracking-only scanner matching."""
+"""Tests for exact tracking and optional native unit verification."""
 
 from __future__ import annotations
 
@@ -57,6 +57,65 @@ def test_unique_exact_barcode_requires_unit_confirmation():
     assert decision.tracking == "1Z999AA10123456784"
     assert "resident" not in decision.candidates[0].to_dict()
     assert decision.confidence == 1.0
+
+
+def test_native_scan_requires_tracking_and_compatible_unit():
+    entries = [_entry("one", "2803S", "Resident", "1Z999AA10123456784")]
+    observation = ScanObservation(
+        barcodes=("1Z999AA10123456784",),
+        unit_candidates=("2803",),
+        unit_confidences=(0.75,),
+        unit_scan_attempted=True,
+    )
+
+    decision = PackageMatcher(entries).decide(observation)
+
+    assert decision.status == "confirm"
+    assert decision.unit_status == "verified"
+    assert decision.scanned_units == ("2803",)
+
+
+def test_native_scan_surfaces_clear_unit_mismatch():
+    entries = [_entry("one", "305S", "Resident", "1Z999AA10123456784")]
+    observation = ScanObservation(
+        barcodes=("1Z999AA10123456784",),
+        unit_candidates=("3005",),
+        unit_confidences=(1.0,),
+        unit_scan_attempted=True,
+    )
+
+    decision = PackageMatcher(entries).decide(observation)
+
+    assert decision.status == "unit_mismatch"
+    assert decision.unit == "305S"
+    assert decision.scanned_units == ("3005",)
+
+
+def test_native_scan_without_readable_unit_allows_manual_fallback():
+    entries = [_entry("one", "305S", "Resident", "1Z999AA10123456784")]
+
+    decision = PackageMatcher(entries).decide(
+        ScanObservation(barcodes=("1Z999AA10123456784",), unit_scan_attempted=True)
+    )
+
+    assert decision.status == "unit_not_read"
+    assert decision.unit == "305S"
+
+
+def test_unknown_tracking_preserves_scanned_unit_for_review():
+    entries = [_entry("one", "305S", "Resident", "1Z999AA10123456784")]
+
+    decision = PackageMatcher(entries).decide(
+        ScanObservation(
+            barcodes=("1Z000ZZ00000000001",),
+            unit_candidates=("3005",),
+            unit_confidences=(1.0,),
+            unit_scan_attempted=True,
+        )
+    )
+
+    assert decision.status == "not_found"
+    assert decision.scanned_units == ("3005",)
 
 
 def test_last_four_alone_never_matches_a_full_tracking_number():

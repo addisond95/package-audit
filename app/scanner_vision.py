@@ -91,6 +91,10 @@ def _detect_carrier(barcodes: tuple[str, ...]) -> str:
 def observation_from_barcodes(
     barcodes: tuple[str, ...],
     barcode_formats: tuple[str, ...] = (),
+    unit_candidates: tuple[str, ...] = (),
+    unit_confidences: tuple[float, ...] = (),
+    *,
+    unit_scan_attempted: bool = False,
 ) -> ScanObservation:
     """Build a normalized observation from browser- or image-decoded barcodes."""
     values: list[str] = []
@@ -106,6 +110,9 @@ def observation_from_barcodes(
         barcodes=normalized_values,
         carrier=_detect_carrier(normalized_values),
         barcode_formats=tuple(formats),
+        unit_candidates=unit_candidates,
+        unit_confidences=unit_confidences,
+        unit_scan_attempted=unit_scan_attempted,
     )
 
 

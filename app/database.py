@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models import (
+    AuditNoteRule,
     DoubleLoggedPackage,
     PackageError,
     ScannerAlert,
@@ -164,6 +165,7 @@ class AuditDatabase:
                 )
                 """
             )
+            self._ensure_column("scanner_alerts", "label_unit", "TEXT NOT NULL DEFAULT ''")
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS scanner_feedback (
@@ -201,6 +203,19 @@ class AuditDatabase:
                 """
                 CREATE TABLE IF NOT EXISTS error_templates (
                     message TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_note_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message TEXT NOT NULL,
+                    metric TEXT NOT NULL,
+                    operator TEXT NOT NULL,
+                    threshold REAL NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 )
                 """
@@ -295,6 +310,47 @@ class AuditDatabase:
     def delete_error_template(self, message: str) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM error_templates WHERE message = ?", (message.strip(),))
+
+    def load_audit_note_rules(self) -> list[AuditNoteRule]:
+        rows = self.conn.execute(
+            """
+            SELECT message, metric, operator, threshold, enabled
+            FROM audit_note_rules ORDER BY id
+            """
+        ).fetchall()
+        return [
+            AuditNoteRule(
+                message=message,
+                metric=metric,
+                operator=rule_operator,
+                threshold=float(threshold),
+                enabled=bool(enabled),
+            )
+            for message, metric, rule_operator, threshold, enabled in rows
+        ]
+
+    def replace_audit_note_rules(self, rules: list[AuditNoteRule]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM audit_note_rules")
+            self.conn.executemany(
+                """
+                INSERT INTO audit_note_rules
+                    (message, metric, operator, threshold, enabled, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        " ".join(rule.message.split()),
+                        rule.metric,
+                        rule.operator,
+                        float(rule.threshold),
+                        int(rule.enabled),
+                        self._now(),
+                    )
+                    for rule in rules
+                    if rule.message.strip()
+                ],
+            )
 
     def load_package_errors(self, pdf_hash: str) -> list[PackageError]:
         rows = self.conn.execute(
@@ -527,13 +583,14 @@ class AuditDatabase:
             self.conn.execute(
                 """
                 INSERT INTO scanner_alerts (
-                    pdf_hash, alert_key, kind, severity, unit, carrier, tracking,
-                    last4, message, item_ids, resolved, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    pdf_hash, alert_key, kind, severity, unit, label_unit, carrier,
+                    tracking, last4, message, item_ids, resolved, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pdf_hash, alert_key) DO UPDATE SET
                     kind = excluded.kind,
                     severity = excluded.severity,
                     unit = excluded.unit,
+                    label_unit = excluded.label_unit,
                     carrier = excluded.carrier,
                     tracking = excluded.tracking,
                     last4 = excluded.last4,
@@ -547,6 +604,7 @@ class AuditDatabase:
                     alert.kind,
                     alert.severity,
                     normalize_unit(alert.unit),
+                    normalize_unit(alert.label_unit),
                     normalize_carrier(alert.carrier),
                     normalize_tracking(alert.tracking),
                     self._last4(alert.last4, alert.tracking),
@@ -561,7 +619,7 @@ class AuditDatabase:
         if include_resolved:
             rows = self.conn.execute(
                 """
-                SELECT alert_key, kind, severity, unit, carrier, tracking, last4,
+                SELECT alert_key, kind, severity, unit, label_unit, carrier, tracking, last4,
                        message, item_ids, resolved, created_at
                 FROM scanner_alerts WHERE pdf_hash = ?
                 ORDER BY resolved, created_at DESC, id DESC
@@ -571,7 +629,7 @@ class AuditDatabase:
         else:
             rows = self.conn.execute(
                 """
-                SELECT alert_key, kind, severity, unit, carrier, tracking, last4,
+                SELECT alert_key, kind, severity, unit, label_unit, carrier, tracking, last4,
                        message, item_ids, resolved, created_at
                 FROM scanner_alerts WHERE pdf_hash = ? AND resolved = 0
                 ORDER BY created_at DESC, id DESC
@@ -584,6 +642,7 @@ class AuditDatabase:
                 kind=kind,
                 severity=severity,
                 unit=unit,
+                label_unit=label_unit,
                 carrier=carrier,
                 tracking=tracking,
                 last4=last4,
@@ -597,6 +656,7 @@ class AuditDatabase:
                 kind,
                 severity,
                 unit,
+                label_unit,
                 carrier,
                 tracking,
                 last4,
