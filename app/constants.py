@@ -17,7 +17,36 @@ APP_DIR = Path.home() / ".package_audit"
 DB_FILENAME = "audit_state.sqlite3"
 
 #: Canonical package storage locations used in the manual report tables.
-LOCATIONS = ["SHELF", "BIN", "BB", "CG", "UG", "ALPHA", "FCR"]
+#: ``CG`` remains for existing data while ``CAGE`` is the clearer new label.
+LOCATIONS = ["SHELF", "BIN", "BB", "CG", "CAGE", "UG", "ALPHA", "FCR", "PERISHABLES", "ODDITIES"]
+
+#: Physical areas that must be confirmed before a final audit export.
+AUDIT_AREAS = (
+    ("SHELF", "Shelf"),
+    ("BB", "BB"),
+    ("ALPHA", "Alpha bin"),
+    ("BIN", "Bin"),
+    ("PERISHABLES", "Perishables"),
+    ("CAGE", "Cage / CG"),
+    ("UG", "UG"),
+    ("FCR", "FCR"),
+    ("ODDITIES", "Oddities / other storage"),
+)
+
+#: Standard resolutions for scanner alerts. The desktop dialog keeps this
+#: list editable and stores additional property-specific templates locally.
+DEFAULT_ERROR_TEMPLATES = (
+    "Not logged — entered",
+    "Logged for one unit but belongs to another",
+    "Relogged / duplicate entry",
+    "Closed in error — reopened",
+    "Wrong unit",
+    "Wrong storage location",
+    "Wrong carrier",
+    "Wrong tracking number",
+    "Package damaged",
+    "Other — see notes",
+)
 
 #: Canonical carrier codes used in the manual report tables.
 CARRIERS = ["USPS", "UPS", "FEDEX", "AMZ", "ONTRAC", "DHL", "PKG", "KEY", "FOOD", "RX"]
@@ -41,13 +70,6 @@ CARRIER_ALIASES = {
 
 #: Placeholder used when a tracking value cannot be determined.
 MISSING_LAST4 = "NaN"
-
-#: Report-note thresholds are deliberately centralized so a property can tune
-#: policy without changing report-generation logic. A note appears when the
-#: count reaches the configured threshold.
-PACKAGE_ERROR_NOTE_THRESHOLD = 3
-DOUBLE_LOGGED_NOTE_THRESHOLD = 3
-NOT_CLOSED_OUT_NOTE_THRESHOLD = 3
 
 #: Default audit highlight color as an RGBA tuple (0-255 per channel).
 DEFAULT_HIGHLIGHT_RGBA = (80, 200, 120, 95)

@@ -16,9 +16,11 @@ from PySide6.QtWidgets import QApplication, QTableWidgetItem
 
 import app.main_window as main_window
 from app.export_pdf import HighlightExportResult
-from app.models import AuditEntry, DoubleLoggedPackage, PackageError
+from app.models import AuditEntry, DoubleLoggedPackage, PackageError, ScannerAlert
 from app.scanner_matching import ScanDecision, ScanObservation
 from app.scanner_server import ScannerAction
+
+REAL_PREPARE_EXPORT = main_window.PackageAuditApp._prepare_export
 
 
 @pytest.fixture(scope="session")
@@ -29,6 +31,7 @@ def application():
 @pytest.fixture()
 def window(tmp_path, monkeypatch, application):
     monkeypatch.setattr(main_window, "APP_DIR", tmp_path)
+    monkeypatch.setattr(main_window.PackageAuditApp, "_prepare_export", lambda _self: True)
     audit_window = main_window.PackageAuditApp()
     audit_window.pdf_hash = "ui-test"
     yield audit_window
@@ -423,7 +426,7 @@ def test_scanner_match_marks_entry_persists_event_and_undoes(window):
     assert window.db.load_scanner_events("ui-test")[0].status == "undone"
 
 
-def test_scanner_not_found_is_idempotent_red_alert_and_undo(window):
+def test_scanner_not_found_is_review_alert_not_package_error_and_can_be_undone(window):
     observation = ScanObservation(barcodes=("1Z999AA10123456784",), carrier="UPS")
     decision = ScanDecision(
         status="not_found",
@@ -441,19 +444,23 @@ def test_scanner_not_found_is_idempotent_red_alert_and_undo(window):
     window._populate_errors_table(window.db.load_package_errors("ui-test"))
     window._refresh_alerts()
 
-    errors = window.db.load_package_errors("ui-test")
     alerts = window.db.load_scanner_alerts("ui-test", include_resolved=False)
-    assert len(errors) == 1
-    assert errors[0].tracking == "1Z999AA10123456784"
-    assert errors[0].note == "Not logged"
-    assert len(alerts) == 1 and alerts[0].severity == "error"
+    assert window.db.load_package_errors("ui-test") == []
+    assert len(alerts) == 1
+    assert alerts[0].tracking == "1Z999AA10123456784"
+    assert (alerts[0].kind, alerts[0].severity) == ("unmatched", "review")
+
+    window._apply_scanner_action(ScannerAction("scan-missing", "flag_error", observation, decision))
+    flagged = window.db.load_scanner_alerts("ui-test", include_resolved=False)[0]
+    assert (flagged.kind, flagged.severity) == ("unmatched", "error")
+    assert window.db.load_package_errors("ui-test") == []
 
     window._undo_scanner_action("scan-missing")
     assert window.db.load_package_errors("ui-test") == []
     assert window.db.load_scanner_alerts("ui-test") == []
 
 
-def test_scanner_unit_only_not_found_row_is_removed_by_undo(window):
+def test_scanner_unit_only_not_found_creates_only_review_alert(window):
     observation = ScanObservation(carrier="PKG")
     decision = ScanDecision(
         status="not_found",
@@ -465,14 +472,44 @@ def test_scanner_unit_only_not_found_row_is_removed_by_undo(window):
     )
 
     window._apply_scanner_action(ScannerAction("scan-unit-only", "not_found", observation, decision))
-    assert [row.unit for row in window.db.load_package_errors("ui-test")] == ["9901S"]
+    assert window.db.load_package_errors("ui-test") == []
+    assert [row.unit for row in window.db.load_scanner_alerts("ui-test")] == ["9901S"]
 
     window._undo_scanner_action("scan-unit-only")
 
     assert window.db.load_package_errors("ui-test") == []
 
 
-def test_scanner_duplicate_logs_each_unit_orange_and_undoes(window):
+def test_scanner_unit_mismatch_becomes_review_alert_and_templated_error(window):
+    tracking = "1Z999AA10123456784"
+    observation = ScanObservation(barcodes=(tracking,), carrier="UPS")
+    decision = ScanDecision(
+        status="confirm",
+        confidence=1.0,
+        message="Confirm",
+        tracking=tracking,
+        unit="1701S",
+        carrier="UPS",
+        scan_key=observation.scan_key,
+        related_item_ids=("one",),
+    )
+
+    window._apply_scanner_action(ScannerAction("scan-mislog", "flag_review", observation, decision))
+    alert = window.db.load_scanner_alerts("ui-test", include_resolved=False)[0]
+
+    assert (alert.kind, alert.unit, alert.tracking) == ("mislog", "1701S", tracking)
+    dialog = main_window.AlertResolutionDialog(alert, window._error_templates(), window)
+    assert dialog.unit.text() == ""
+    dialog.unit.setText("1802S")
+    error = dialog.package_error
+    assert error.unit == "1802S"
+    assert error.note == "Logged for unit 1701S but belongs to unit 1802S"
+
+    window._undo_scanner_action("scan-mislog")
+    assert window.db.load_scanner_alerts("ui-test") == []
+
+
+def test_scanner_duplicate_logs_once_marks_physical_package_and_can_undo_presence(window):
     tracking = "1Z999AA10123456784"
     window.entries = [
         AuditEntry("one", 0, "0205S", "Jane", f"UPS - #1 - {tracking}", "South", "", False),
@@ -492,12 +529,16 @@ def test_scanner_duplicate_logs_each_unit_orange_and_undoes(window):
     window._apply_scanner_action(ScannerAction("scan-duplicate", "duplicate", observation, decision))
     window._refresh_alerts()
 
-    assert len(window.db.load_double_logged("ui-test")) == 2
+    rows = window.db.load_double_logged("ui-test")
+    assert len(rows) == 1
+    assert rows[0].unit == "0205S / 3904S"
+    assert all(entry.audited for entry in window.entries)
     assert window.scanner_item_states == {"one": "warning", "two": "warning"}
     assert len(window.db.load_scanner_alerts("ui-test", include_resolved=False)) == 1
 
     window._undo_scanner_action("scan-duplicate")
-    assert window.db.load_double_logged("ui-test") == []
+    assert len(window.db.load_double_logged("ui-test")) == 1
+    assert not any(entry.audited for entry in window.entries)
     assert window.db.load_scanner_alerts("ui-test") == []
 
 
@@ -520,7 +561,8 @@ def test_duplicate_undo_preserves_other_blank_tracking_rows(window):
     )
 
     window._apply_scanner_action(ScannerAction("scan-blank-tracking", "duplicate", observation, decision))
-    assert len(window.db.load_double_logged("ui-test")) == 2
+    assert len(window.db.load_double_logged("ui-test")) == 1
+    assert entry.audited is True
 
     window._undo_scanner_action("scan-blank-tracking")
 
@@ -563,6 +605,84 @@ def test_review_alert_can_be_resolved_and_reopened(window):
     assert window.db.load_scanner_alerts("ui-test")[0].resolved is False
 
 
+def test_export_readiness_blocks_until_open_alerts_are_reviewed(window, monkeypatch):
+    window.entries = [_entry("one", "0205S", "Jane Doe")]
+    window.db.upsert_scanner_alert(
+        "ui-test",
+        ScannerAlert(
+            alert_key="not_found:TRACK1234",
+            kind="unmatched",
+            severity="review",
+            tracking="TRACK1234",
+            message="Review tracking",
+        ),
+    )
+    messages = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda *_args: messages.append(_args[-1]))
+
+    assert REAL_PREPARE_EXPORT(window) is False
+    assert window.tabs.currentIndex() == 3
+    assert "1 open scanner alert" in " ".join(messages)
+
+
+def test_export_readiness_requires_and_persists_every_area(window, monkeypatch):
+    required = {key for key, _label in main_window.AUDIT_AREAS}
+
+    class CompleteChecklist:
+        checked_areas = required
+
+        def __init__(self, checked, _parent):
+            assert checked == set()
+
+        def exec(self):
+            return main_window.QDialog.Accepted
+
+    monkeypatch.setattr(main_window, "AuditAreaChecklistDialog", CompleteChecklist)
+
+    assert REAL_PREPARE_EXPORT(window) is True
+    assert window.db.load_area_checks("ui-test") == required
+
+
+def test_review_alert_converts_it_to_templated_package_error(window, monkeypatch):
+    alert = ScannerAlert(
+        alert_key="not_found:1Z999AA10123456784",
+        kind="unmatched",
+        severity="error",
+        carrier="UPS",
+        tracking="1Z999AA10123456784",
+        message="Review tracking",
+    )
+    window.db.upsert_scanner_alert("ui-test", alert)
+    window._refresh_alerts()
+    window.alerts_table.selectRow(0)
+
+    class AcceptedResolution:
+        package_error = PackageError(
+            "1701S",
+            "BIN",
+            "UPS",
+            "6784",
+            "Logged for one unit but belongs to another",
+            "1Z999AA10123456784",
+        )
+
+        def __init__(self, selected, templates, _parent):
+            assert selected.tracking == alert.tracking
+            assert "Closed in error — reopened" in templates
+
+        def exec(self):
+            return main_window.QDialog.Accepted
+
+    monkeypatch.setattr(main_window, "AlertResolutionDialog", AcceptedResolution)
+    window.review_selected_alerts()
+
+    errors = window.db.load_package_errors("ui-test")
+    assert len(errors) == 1
+    assert errors[0].tracking == alert.tracking
+    assert errors[0].note == "Logged for one unit but belongs to another"
+    assert window.db.load_scanner_alerts("ui-test")[0].resolved is True
+
+
 def test_configure_scanner_detects_existing_duplicate_tracking(window):
     tracking = "1Z999AA10123456784"
     window.entries = [
@@ -571,8 +691,14 @@ def test_configure_scanner_detects_existing_duplicate_tracking(window):
     ]
 
     window._configure_scanner_for_audit()
+    window._refresh_table()
 
-    assert len(window.db.load_double_logged("ui-test")) == 2
+    rows = window.db.load_double_logged("ui-test")
+    assert len(rows) == 1
+    assert rows[0].unit == "0205S / 3904S"
+    assert window.duplicate_suppressed_ids == {"two"}
+    assert window.entries[1].audited is True
+    assert window.table.rowCount() == 1
     assert len(window.db.load_scanner_alerts("ui-test", include_resolved=False)) == 1
 
 

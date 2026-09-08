@@ -7,7 +7,7 @@ the cable is not needed for audits. Android 12 or newer and a Bluetooth-capable 
 
 ## Install once
 
-The locally built installer is `dist/PackageAuditScanner-0.10.0.apk`. Keep the matching Mac version (0.10.0).
+The locally built installer is `dist/PackageAuditScanner-0.11.0.apk`. Keep the matching Mac version (0.11.0).
 
 1. On the Samsung, enable Developer options by tapping **Settings → About phone → Software information →
    Build number** seven times, then enable **USB debugging** in Developer options.
@@ -20,7 +20,7 @@ The locally built installer is `dist/PackageAuditScanner-0.10.0.apk`. Keep the m
    ```bash
    cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
    adb devices -l
-   adb install -r dist/PackageAuditScanner-0.10.0.apk
+   adb install -r dist/PackageAuditScanner-0.11.0.apk
    ```
 
    The device must say `device`, not `unauthorized`. A blank list means USB debugging or the data connection
@@ -53,21 +53,27 @@ prevents idle Mac sleep for the life of the app. Leave the Mac lid open and keep
 3. Wait for **Ready to pair**. Open the Android app, tap **Pair with Mac**, and point at the QR in that dialog.
    This is an app-specific pairing QR, not a website. Do not pair through the system Bluetooth device list.
 4. Wait for **Connected securely • Bluetooth only**, then tap **Scan packages** once.
-5. Fill the camera preview with one package's tracking barcode. Keep the entire barcode and its white margins
-   visible. Tap the preview to focus or use **Flashlight** if needed. Two consistent readings are required.
+5. Fill the camera preview with the package's shipping labels. Keep each barcode and its white margins visible.
+   Tap the preview to focus or use **Flashlight** if needed. The app briefly collects stable carrier barcodes
+   before asking the Mac to check all of them.
 6. The phone shows the audit's logged unit. Check it against the label, then tap **Confirm unit …**.
    Only confirmation marks the matching audit row checked. Wait for **Saved on Mac**.
 7. Scanning resumes automatically after the saved acknowledgment. Move to the next box; the same visible
    barcode is suppressed until it leaves the frame or a different barcode is detected.
-8. An unknown tracking number or duplicate produces a review result. Check it, use **Undo last saved scan**
-   if needed, then **Scan next package**. **Wrong barcode — rescan** dismisses a pending suggestion.
-9. Finish/export in the Mac app, then click **Stop Bluetooth Scanner**. A new audit or scanner restart needs
-   a fresh pairing QR.
+8. For an unknown tracking number, choose **Rescan label** or **Flag for end review**. Flagging preserves its
+   full tracking number in Mac Alerts without automatically creating a Package Error. Duplicates are also
+   retained for review.
+   If tracking matches but the displayed unit is wrong, choose **Flag unit mismatch** instead of confirming.
+   Final review asks for the correct unit and generates the full logged-unit/correct-unit reason automatically.
+9. Review every Mac alert, converting genuine issues to Package Errors with a standard reason template or
+   dismissing verified non-errors. Export remains locked while alerts are open.
+10. Confirm every physical storage area in the final export checklist, export, then click **Stop Bluetooth
+    Scanner**. A new audit or scanner restart needs a fresh pairing QR.
 
 Matching is exact tracking-only; there is no printed-text/name/unit OCR and no last-four-only matching.
 If the PDF contains only a shortened tracking value, the scanner cannot safely infer the full tracking number;
 use the Mac's manual unit search for that package. Wrinkled, damaged, very small, or unsupported barcodes may
-also require manual lookup. Automatically logged unknown barcodes can be undone.
+also require manual lookup. Flagged unknown barcodes can be undone or resolved from the Mac Alerts tab.
 
 ## Disconnects and safe recovery
 
@@ -124,7 +130,7 @@ uv run python scripts/build_android.py
 ```
 
 The Gradle wrapper downloads Gradle 8.11.1 on first use. The script runs release unit tests and Android lint,
-builds a signed APK, and copies it to `dist/PackageAuditScanner-0.10.0.apk`. `.signing/` contains the private
+builds a signed APK, and copies it to `dist/PackageAuditScanner-0.11.0.apk`. `.signing/` contains the private
 local update key and password: back it up securely, never commit/share it, and retain it for future updates.
 This is a privately installed build, not a Play Store release or an independently audited security product.
 

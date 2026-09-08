@@ -162,6 +162,10 @@ class ScannerBluetoothSession:
                 result = self.coordinator.confirm(scan_id, item_id)
             elif op == "reject":
                 result = self.coordinator.reject(scan_id)
+            elif op == "not_found":
+                result = self.coordinator.mark_not_found(scan_id)
+            elif op == "flag_review":
+                result = self.coordinator.flag_review(scan_id)
             elif op == "undo":
                 result = self.coordinator.undo(scan_id)
             else:

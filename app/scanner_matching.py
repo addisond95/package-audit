@@ -205,6 +205,14 @@ class PackageMatcher:
     def __init__(self, entries: list[AuditEntry]) -> None:
         self.records = [AuditMatchRecord.from_entry(entry) for entry in entries]
         self.records_by_id = {record.item_id: record for record in self.records}
+        self.physical_records: list[AuditMatchRecord] = []
+        claimed_trackings: set[str] = set()
+        for record in self.records:
+            trackings = set(record.trackings)
+            if trackings and trackings & claimed_trackings:
+                continue
+            self.physical_records.append(record)
+            claimed_trackings.update(trackings)
         self.tracking_index: dict[str, list[AuditMatchRecord]] = {}
         for record in self.records:
             for tracking in record.trackings:
@@ -291,7 +299,10 @@ class PackageMatcher:
             return ScanDecision(
                 status="not_found",
                 confidence=1.0,
-                message="This tracking number is not in the loaded audit. It was logged as Not logged.",
+                message=(
+                    "This tracking number is not in the loaded audit. Rescan if the label may be wrong, "
+                    "or flag it for end-of-audit review."
+                ),
                 tracking=tracking,
                 carrier=observation.carrier,
                 scan_key=observation.scan_key,

@@ -48,6 +48,19 @@ def test_state_is_isolated_per_pdf_hash(db):
     assert db.load_state("hash-b") == {"item-1": True}
 
 
+def test_area_checks_and_custom_error_templates_round_trip(db):
+    db.replace_area_checks("hash-a", {"SHELF", "BIN"})
+    db.replace_area_checks("hash-b", {"FCR"})
+    assert db.load_area_checks("hash-a") == {"SHELF", "BIN"}
+    assert db.load_area_checks("hash-b") == {"FCR"}
+
+    assert db.add_error_template("  Delivered to wrong tower  ") is True
+    assert db.add_error_template("Delivered   to wrong tower") is False
+    assert db.load_custom_error_templates() == ["Delivered to wrong tower"]
+    db.delete_error_template("Delivered to wrong tower")
+    assert db.load_custom_error_templates() == []
+
+
 def test_package_errors_round_trip_with_normalization(db):
     db.replace_package_errors(
         "hash-a",
@@ -102,12 +115,14 @@ def test_clear_all_for_pdf_removes_everything(db):
     db.replace_double_logged("hash-a", [DoubleLoggedPackage("0201S", "BIN", "AMZ", "5561")])
     db.record_scanner_feedback("hash-a", "scan-key", "accepted")
     db.record_scanner_feedback("hash-b", "other-key", "accepted")
+    db.replace_area_checks("hash-a", {"SHELF"})
 
     db.clear_all_for_pdf("hash-a")
 
     assert db.load_state("hash-a") == {}
     assert db.load_package_errors("hash-a") == []
     assert db.load_double_logged("hash-a") == []
+    assert db.load_area_checks("hash-a") == set()
     remaining_feedback_hashes = {
         row[0] for row in db.conn.execute("SELECT pdf_hash FROM scanner_feedback").fetchall()
     }

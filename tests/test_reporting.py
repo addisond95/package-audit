@@ -108,8 +108,9 @@ def test_report_uses_ascii_section_rules():
 
 def test_report_shows_none_for_empty_sections():
     report = make_audit_report([], [], [])
-    assert report.count("None") == 4
+    assert report.count("None") == 3
     assert "PACKAGE AUDIT REPORT" in report
+    assert "Overall result: Excellent audit" in report
 
 
 def test_report_uses_special_package_type_instead_of_nan_for_open_items():
@@ -130,7 +131,7 @@ def test_report_uses_special_package_type_instead_of_nan_for_open_items():
     assert "NaN" not in open_section
 
 
-def test_audit_notes_appear_at_threshold_with_actionable_counts():
+def test_audit_notes_use_percentages_and_actionable_breakdown():
     entries = [_entry(f"100{index}S", f"UPS - #{index} - TRACK000{index}", False) for index in range(3)]
     errors = [PackageError(f"200{index}S", "", "PKG", "1234", "error") for index in range(3)]
     doubles = [DoubleLoggedPackage(f"300{index}S", "", "UPS", "5678") for index in range(3)]
@@ -138,21 +139,36 @@ def test_audit_notes_appear_at_threshold_with_actionable_counts():
     report = make_audit_report(entries, errors, doubles)
     notes = report.split("4. AUDIT NOTES")[1]
 
-    assert "3 package errors recorded" in notes
-    assert "3 double-logged packages recorded" in notes
-    assert "3 packages were picked up but not closed out" in notes
-    assert notes.count("Staff should take extra care") == 3
+    assert "0 of 3 physical packages accounted for (0.0%)" in notes
+    assert "Package errors: 3 of 3 (100.0% of the audit)" in notes
+    assert "Duplicate logs: 3 of 3 (100.0% of the audit)" in notes
+    assert "Error breakdown: error (3)" in notes
+    assert "Follow-up:" in notes
 
 
-def test_audit_notes_stay_empty_below_threshold():
-    entries = [_entry("1001S", "UPS - #1 - TRACK0001", False)]
-    report = make_audit_report(
-        entries,
-        [PackageError("2001S", "", "PKG", "1234", "error")],
-        [DoubleLoggedPackage("3001S", "", "UPS", "5678")],
-    )
+def test_same_issue_count_scores_better_in_a_larger_audit():
+    error = [PackageError("2001S", "", "PKG", "1234", "Wrong unit")]
+    small = make_audit_report([_entry("1001S", "UPS - #1 - TRACK0001", True)], error, [])
+    large_entries = [
+        _entry(f"{1000 + index}S", f"UPS - #{index} - TRACK{1000 + index}", True) for index in range(20)
+    ]
+    large = make_audit_report(large_entries, error, [])
 
-    assert report.split("4. AUDIT NOTES")[1].strip("\n=") == "None"
+    assert "25.0% quality score" in small
+    assert "96.2% quality score" in large
+    assert "Good audit" in large
+
+
+def test_duplicate_source_rows_appear_only_once_in_open_packages():
+    tracking = "1Z999AA10123456784"
+    entries = [
+        _entry("1001S", f"UPS - #1 - {tracking}", False),
+        _entry("1001S", f"UPS - #2 - {tracking}", False),
+    ]
+
+    open_section = make_audit_report(entries, [], []).split("2. PACKAGE ERRORS")[0]
+
+    assert open_section.count("1001S | 6784") == 1
 
 
 def test_failed_report_export_preserves_existing_file(tmp_path, monkeypatch):

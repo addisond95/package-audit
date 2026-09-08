@@ -187,6 +187,24 @@ class AuditDatabase:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_area_checks (
+                    pdf_hash TEXT NOT NULL,
+                    area TEXT NOT NULL,
+                    checked INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (pdf_hash, area)
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS error_templates (
+                    message TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
     def load_state(self, pdf_hash: str) -> dict[str, bool]:
         rows = self.conn.execute(
@@ -238,6 +256,45 @@ class AuditDatabase:
             self.conn.execute("DELETE FROM scanner_alerts WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM scanner_events WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM scanner_feedback WHERE pdf_hash = ?", (pdf_hash,))
+            self.conn.execute("DELETE FROM audit_area_checks WHERE pdf_hash = ?", (pdf_hash,))
+
+    def load_area_checks(self, pdf_hash: str) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT area FROM audit_area_checks WHERE pdf_hash = ? AND checked = 1",
+            (pdf_hash,),
+        ).fetchall()
+        return {area for (area,) in rows}
+
+    def replace_area_checks(self, pdf_hash: str, areas: set[str]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM audit_area_checks WHERE pdf_hash = ?", (pdf_hash,))
+            self.conn.executemany(
+                "INSERT INTO audit_area_checks (pdf_hash, area, checked) VALUES (?, ?, 1)",
+                [(pdf_hash, area) for area in sorted(areas)],
+            )
+
+    def load_custom_error_templates(self) -> list[str]:
+        return [
+            message
+            for (message,) in self.conn.execute(
+                "SELECT message FROM error_templates ORDER BY message COLLATE NOCASE"
+            ).fetchall()
+        ]
+
+    def add_error_template(self, message: str) -> bool:
+        value = " ".join(message.split())
+        if not value:
+            return False
+        with self.conn:
+            cursor = self.conn.execute(
+                "INSERT OR IGNORE INTO error_templates (message, created_at) VALUES (?, ?)",
+                (value, self._now()),
+            )
+        return cursor.rowcount > 0
+
+    def delete_error_template(self, message: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM error_templates WHERE message = ?", (message.strip(),))
 
     def load_package_errors(self, pdf_hash: str) -> list[PackageError]:
         rows = self.conn.execute(
@@ -419,6 +476,31 @@ class AuditDatabase:
                 ),
             )
         return True
+
+    def replace_tracking_duplicate(self, pdf_hash: str, row: DoubleLoggedPackage) -> None:
+        """Store one summary row for a known full-tracking duplicate group."""
+        tracking = normalize_tracking(row.tracking)
+        if not tracking:
+            return
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM double_logged WHERE pdf_hash = ? AND tracking = ?",
+                (pdf_hash, tracking),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO double_logged (pdf_hash, unit, location, carrier, tracking, last4)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pdf_hash,
+                    normalize_unit(row.unit),
+                    normalize_location(row.location),
+                    normalize_carrier(row.carrier),
+                    tracking,
+                    self._last4(row.last4, tracking),
+                ),
+            )
 
     def delete_double_logged(self, pdf_hash: str, row: DoubleLoggedPackage) -> None:
         """Delete one exact automatic duplicate without removing nearby manual data."""

@@ -82,6 +82,32 @@ def test_distinct_known_barcodes_require_isolating_one_label():
     assert set(decision.related_item_ids) == {"one", "two"}
 
 
+def test_known_tracking_wins_after_all_carrier_barcodes_are_checked():
+    entries = [_entry("one", "1701S", "Mathiesen", "1Z999AA10123456784")]
+
+    decision = PackageMatcher(entries).decide(
+        ScanObservation(
+            barcodes=("9400000000000000000000", "1Z999AA10123456784"),
+            barcode_formats=("CODE_128", "CODE_128"),
+        )
+    )
+
+    assert decision.status == "confirm"
+    assert decision.unit == "1701S"
+    assert decision.tracking == "1Z999AA10123456784"
+
+
+def test_matching_barcode_wins_when_same_label_has_an_unmatched_carrier_barcode():
+    entries = [_entry("one", "1701S", "Mathiesen", "1Z999AA10123456784")]
+
+    decision = PackageMatcher(entries).decide(
+        ScanObservation(barcodes=("9400000000000000000000", "1Z999AA10123456784"))
+    )
+
+    assert decision.status == "confirm"
+    assert decision.tracking == "1Z999AA10123456784"
+
+
 def test_reliable_unmatched_tracking_is_logged_not_found_without_a_unit():
     entries = [_entry("one", "1701S", "Mathiesen", "1Z999AA10123456784")]
 
@@ -138,6 +164,7 @@ def test_duplicate_tracking_across_units_is_a_duplicate_decision():
     assert decision.status == "duplicate"
     assert set(decision.related_item_ids) == {"one", "two"}
     assert matcher.duplicate_groups()[0][0] == "1Z999AA10123456784"
+    assert [record.item_id for record in matcher.physical_records] == ["one"]
 
 
 def test_already_audited_exact_match_is_idempotent():

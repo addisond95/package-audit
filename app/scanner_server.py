@@ -68,6 +68,7 @@ class _StoredScan:
     decision: ScanDecision
     created_at: float
     rejected: bool = False
+    flagged: bool = False
     undo_queued: bool = False
 
 
@@ -157,12 +158,12 @@ class ScannerCoordinator:
     def status(self) -> dict[str, Any]:
         with self._lock:
             self._prune_scans()
-            audited = sum(record.audited for record in self._matcher.records)
+            audited = sum(record.audited for record in self._matcher.physical_records)
             return {
                 "audit_loaded": bool(self._pdf_hash and self._matcher.records),
-                "packages": len(self._matcher.records),
+                "packages": len(self._matcher.physical_records),
                 "audited": audited,
-                "remaining": len(self._matcher.records) - audited,
+                "remaining": len(self._matcher.physical_records) - audited,
                 "alerts": dict(self._alert_summary),
                 "capabilities": scanner_capabilities().to_dict(),
             }
@@ -258,20 +259,29 @@ class ScannerCoordinator:
             self._scan_ids_by_key.pop(stored.observation.scan_key, None)
 
     @staticmethod
-    def _can_mark_not_found(_stored: _StoredScan) -> bool:
-        return False
+    def _can_mark_not_found(stored: _StoredScan) -> bool:
+        return stored.decision.status == "not_found" and not stored.rejected and not stored.flagged
 
     @staticmethod
     def _can_undo(stored: _StoredScan) -> bool:
-        return not stored.undo_queued and stored.decision.status in {
-            "matched",
-            "not_found",
-            "duplicate",
-        }
+        return not stored.undo_queued and (
+            stored.flagged
+            or stored.decision.status
+            in {
+                "matched",
+                "not_found",
+                "duplicate",
+            }
+        )
 
     @classmethod
     def _response(cls, stored: _StoredScan, *, repeated: bool = False) -> dict[str, Any]:
         response = stored.decision.to_dict()
+        if stored.flagged:
+            response.update(
+                status="flagged",
+                message="Flagged for end-of-audit review on the Mac.",
+            )
         response["scan_id"] = stored.scan_id
         response["repeated"] = repeated
         response["can_mark_not_found"] = cls._can_mark_not_found(stored)
@@ -283,6 +293,8 @@ class ScannerCoordinator:
             stored = self._require_scan(scan_id)
             if stored.undo_queued:
                 raise ValueError("This scan was undone. Scan the label again before choosing a package.")
+            if stored.flagged:
+                raise ValueError("This scan was flagged for review. Scan the package again to confirm it.")
             if stored.decision.status == "matched":
                 if item_id in stored.decision.related_item_ids:
                     return self._response(stored, repeated=True)
@@ -353,8 +365,24 @@ class ScannerCoordinator:
         with self._lock:
             stored = self._require_scan(scan_id)
             if stored.decision.status == "not_found" and not stored.rejected:
-                return self._response(stored, repeated=True)
+                if stored.flagged:
+                    return self._response(stored, repeated=True)
+                stored.flagged = True
+                self._actions.put(ScannerAction(scan_id, "flag_error", stored.observation, stored.decision))
+                return self._response(stored)
             raise ValueError("Only a scanned tracking barcode can be marked not logged.")
+
+    def flag_review(self, scan_id: str) -> dict[str, Any]:
+        """Flag a known tracking whose unit does not match the physical label."""
+        with self._lock:
+            stored = self._require_scan(scan_id)
+            if stored.decision.status == "confirm" and not stored.rejected:
+                if stored.flagged:
+                    return self._response(stored, repeated=True)
+                stored.flagged = True
+                self._actions.put(ScannerAction(scan_id, "flag_review", stored.observation, stored.decision))
+                return self._response(stored)
+            raise ValueError("Only an unconfirmed audit match can be flagged as a unit mismatch.")
 
     def undo(self, scan_id: str) -> dict[str, Any]:
         with self._lock:
@@ -419,7 +447,7 @@ main{padding:18px}.notice{display:none;border-radius:9px;padding:11px 12px;margi
 .upload-actions{display:grid;grid-template-columns:1fr auto;gap:9px}.upload-actions button,.actions button,.candidate,.notice button{min-height:52px;border-radius:9px;font-size:17px;font-weight:750}.primary{border:0;background:#176b4d;color:white;padding:15px 18px}.secondary{border:1px solid #aeb7c2;background:white;color:#28343f;padding:12px 14px}button:disabled{opacity:.5}.upload-actions input{display:none}
 .live-view{display:none;position:relative;margin:13px 0 9px;border-radius:12px;overflow:hidden;background:#101816;aspect-ratio:4/3}.live-view.show{display:block}.live-view video{width:100%;height:100%;display:block;object-fit:cover}.scan-shade{position:absolute;inset:0;background:linear-gradient(#0008 0 20%,transparent 20% 70%,#0008 70%)}.scan-guide{position:absolute;left:5%;right:5%;top:27%;height:38%;border:3px solid #73d6a2;border-radius:10px;box-shadow:0 0 0 999px #00000018}.scan-line{position:absolute;left:9%;right:9%;top:46%;height:2px;background:#73d6a2;box-shadow:0 0 8px #73d6a2}.live-label{position:absolute;left:10px;right:10px;bottom:10px;padding:8px 10px;border-radius:8px;background:#101816d9;color:white;text-align:center;font-size:13px;font-weight:750}
 .hint{text-align:center;color:#66717d;font-size:13px;line-height:1.4;margin:10px 0 17px}.busy{display:none;text-align:center;padding:25px 10px;color:#4f5d68;font-weight:700}.busy.show{display:block}.spinner{display:inline-block;width:18px;height:18px;border:3px solid #c7d2cd;border-top-color:#176b4d;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-4px;margin-right:7px}@keyframes spin{to{transform:rotate(360deg)}}
-.result{display:none;border:1px solid #d4dae1;border-left:6px solid #64748b;border-radius:10px;padding:16px;outline:none}.result.show{display:block}.result.confirm{border-left-color:#176b4d;background:#effaf5}.result.matched,.result.already_matched{border-left-color:#16845b;background:#effaf5}.result.not_found{border-left-color:#d92d20;background:#fff3f1}.result.duplicate{border-left-color:#e78b09;background:#fff8e8}.result.poor_scan,.result.rejected{border-left-color:#d9a300;background:#fffbea}.result.undo_queued{border-left-color:#64748b;background:#f4f6f8}.result h2{font-size:19px;line-height:1.25;margin:0 0 8px}.result p{margin:5px 0;color:#4c5864}.unit-number{font-size:42px;font-weight:850;line-height:1;margin:12px 0 8px}.meta{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.meta span{background:#ffffffa8;border-radius:99px;padding:5px 8px;font-size:13px}.candidate{width:100%;text-align:left;border:1px solid #b9c2cc;background:white;padding:12px;margin-top:9px}.candidate strong,.candidate span{display:block}.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}.actions button{flex:1;border:1px solid #aeb7c2;background:white;padding:12px 13px;color:#28343f}.actions .confirm-action{border:0;background:#176b4d;color:white}.actions .danger{color:#b42318;border-color:#e8a49e}.privacy{text-align:center;color:#71808c;font-size:12px;margin:18px 0 0}
+.result{display:none;border:1px solid #d4dae1;border-left:6px solid #64748b;border-radius:10px;padding:16px;outline:none}.result.show{display:block}.result.confirm{border-left-color:#176b4d;background:#effaf5}.result.matched,.result.already_matched{border-left-color:#16845b;background:#effaf5}.result.not_found,.result.flagged{border-left-color:#d92d20;background:#fff3f1}.result.duplicate{border-left-color:#e78b09;background:#fff8e8}.result.poor_scan,.result.rejected{border-left-color:#d9a300;background:#fffbea}.result.undo_queued{border-left-color:#64748b;background:#f4f6f8}.result h2{font-size:19px;line-height:1.25;margin:0 0 8px}.result p{margin:5px 0;color:#4c5864}.unit-number{font-size:42px;font-weight:850;line-height:1;margin:12px 0 8px}.meta{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}.meta span{background:#ffffffa8;border-radius:99px;padding:5px 8px;font-size:13px}.candidate{width:100%;text-align:left;border:1px solid #b9c2cc;background:white;padding:12px;margin-top:9px}.candidate strong,.candidate span{display:block}.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}.actions button{flex:1;border:1px solid #aeb7c2;background:white;padding:12px 13px;color:#28343f}.actions .confirm-action{border:0;background:#176b4d;color:white}.actions .danger{color:#b42318;border-color:#e8a49e}.privacy{text-align:center;color:#71808c;font-size:12px;margin:18px 0 0}
 @media(max-width:360px){.upload-actions{grid-template-columns:1fr}.progress-card{align-items:flex-start;flex-direction:column;gap:2px}}@media(prefers-reduced-motion:reduce){.spinner{animation:none}.progress-fill{transition:none}.scan-line{display:none}}
 </style></head><body><div class="shell"><header class="top"><div class="title-row"><h1>Package Scanner</h1><div id="connection" class="connection"><span class="dot"></span><span id="connection-text">Checking desktop…</span></div></div><div class="progress-card"><strong id="progress-text">Loading audit…</strong><span id="remaining-text"></span></div><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><div class="summary" id="summary"></div></header><main><div id="connection-notice" class="notice error" role="alert"></div><div id="capability-notice" class="notice warning"></div><div class="upload-actions"><button id="camera-button" class="primary" type="button">Scan package</button><button id="library-button" class="secondary" type="button">Existing photo</button><input id="camera-image" type="file" accept="image/*" capture="environment"><input id="library-image" type="file" accept="image/*"></div><section id="live-view" class="live-view" aria-label="Live tracking barcode camera"><video id="live-video" autoplay muted playsinline></video><div class="scan-shade"></div><div class="scan-guide"></div><div class="scan-line"></div><div id="live-label" class="live-label">Point the guide at one tracking barcode</div></section><div id="scan-hint" class="hint">Tap Scan package once. The live camera reads the tracking barcode automatically—no picture or Submit step.</div><div id="busy" class="busy" role="status" aria-live="polite"><span class="spinner"></span><span id="busy-text">Reading tracking barcode…</span></div><section id="result" class="result" aria-live="polite" tabindex="-1"></section><p class="privacy">{{ scanner_privacy }}</p></main></div><script>
 const csrf=document.querySelector('meta[name=csrf-token]').content;
@@ -433,10 +461,11 @@ function setConnection(online,message,authEnded=false){desktopOnline=online;cons
 async function api(path,options={},timeoutMs=requestTimeoutMs){options.headers={...(options.headers||{}),'X-CSRF-Token':csrf};const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),timeoutMs);let response;try{response=await fetch(path,{...options,signal:controller.signal})}catch(_error){const error=new Error('Desktop did not respond. Check the phone connection, keep the scanner running, and try again.');error.network=true;throw error}finally{clearTimeout(timeout)}const data=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(data.error||`Request failed (${response.status})`);error.status=response.status;throw error}return data}
 function actionButton(label,action,cls=''){return `<button type="button" class="${cls}" data-action="${action}">${esc(label)}</button>`}
 function bindResultActions(){resultBox.querySelectorAll('[data-candidate]').forEach(button=>button.addEventListener('click',()=>confirmMatch(Number(button.dataset.candidate))));resultBox.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>runAction(button.dataset.action)));updateControls()}
-function render(data){current=data;if(liveActive)livePaused=true;const allowed=['confirm','matched','already_matched','not_found','duplicate','poor_scan','rejected','undo_queued'];const status=allowed.includes(data.status)?data.status:'poor_scan';const tracking=String(data.tracking||'');resultBox.className=`result show ${status}`;let html=`<h2>${esc(data.message||'Scan complete')}</h2>`;if(status==='confirm'){html+=`<div class="unit-number">${esc(data.unit)}</div><div class="meta"><span>Tracking …${esc(tracking.slice(-4))}</span></div><div class="actions">${actionButton(`Confirm unit ${data.unit}`, 'confirm','confirm-action')}${actionButton('Wrong barcode — rescan','reject','danger')}</div>`}
+function render(data){current=data;if(liveActive)livePaused=true;const allowed=['confirm','matched','already_matched','not_found','flagged','duplicate','poor_scan','rejected','undo_queued'];const status=allowed.includes(data.status)?data.status:'poor_scan';const tracking=String(data.tracking||'');resultBox.className=`result show ${status}`;let html=`<h2>${esc(data.message||'Scan complete')}</h2>`;if(status==='confirm'){html+=`<div class="unit-number">${esc(data.unit)}</div><div class="meta"><span>Tracking …${esc(tracking.slice(-4))}</span></div><div class="actions">${actionButton(`Confirm unit ${data.unit}`, 'confirm','confirm-action')}${actionButton('Flag unit mismatch','flag-review')}${actionButton('Wrong barcode — rescan','reject','danger')}</div>`}
 else{html+='<div class="meta">';if(data.tracking)html+=`<span>Tracking …${esc(data.tracking.slice(-4))}</span>`;if(data.unit)html+=`<span>Unit ${esc(data.unit)}</span>`;html+='</div>';if(data.repeated)html+='<p>This barcode was already processed; no duplicate action was added.</p>';
 if(status==='already_matched'){html+=`<div class="actions">${actionButton('Scan next package','camera')}${actionButton('Wrong — retake','reject','danger')}</div>`}
-else if(['matched','not_found','duplicate'].includes(status)){html+=`<div class="actions">${actionButton('Scan next package','camera')}${data.can_undo?actionButton('Undo','undo'):''}${actionButton('Wrong — retake','reject','danger')}</div>`}
+else if(status==='not_found'){html+=`<div class="actions">${actionButton('Flag for end review','not-found','confirm-action')}${actionButton('Rescan label','reject','danger')}</div>`}
+else if(['matched','flagged','duplicate'].includes(status)){html+=`<div class="actions">${actionButton('Scan next package','camera')}${data.can_undo?actionButton('Undo','undo'):''}${actionButton('Wrong — retake','reject','danger')}</div>`}
 else if(status==='rejected'){html+=`<div class="actions">${actionButton('Scan again','camera')}</div>`}
 else if(status==='poor_scan'){html+=`<div class="actions">${actionButton('Scan again','camera')}</div>`}
 else{html+=`<div class="actions">${actionButton('Scan next package','camera')}</div>`}}resultBox.innerHTML=html;bindResultActions();resultBox.focus({preventScroll:true});resultBox.scrollIntoView({behavior:'smooth',block:'nearest'});if(navigator.vibrate)navigator.vibrate(status==='matched'?[35]:status==='duplicate'||status==='not_found'?[70,50,70]:[30,40,30])}
@@ -445,9 +474,9 @@ async function prepareImage(file){if(!window.createImageBitmap)return file;try{c
 async function scan(file){if(requestBusy||!desktopOnline)return;livePaused=liveActive;resultBox.classList.remove('show');setBusy(true,'Preparing scan…');try{const prepared=await prepareImage(file);if(prepared.size>maximumUploadBytes)throw new Error('This photo is too large. Move closer to the tracking barcode and try again.');setBusy(true,'Looking up tracking…');const form=new FormData();form.append('image',prepared,'tracking-barcode.jpg');render(await api('/api/scan',{method:'POST',body:form}));await refresh(true)}catch(error){renderFailure(error)}finally{cameraInput.value='';libraryInput.value='';setBusy(false)}}
 async function requestAction(path,options={}){if(requestBusy||!current?.scan_id)return;setBusy(true,'Updating desktop…');try{render(await api(path,options));await refresh(true)}catch(error){renderFailure(error)}finally{setBusy(false)}}
 function confirmMatch(index){const candidate=current?.candidates?.[index];if(!candidate)return;requestAction(`/api/scans/${current.scan_id}/confirm`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({item_id:candidate.item_id})})}
-function runAction(action){if(action==='camera'){resumeLiveScanner();return}if(action==='confirm'){confirmMatch(0);return}const paths={reject:'reject',undo:'undo'};if(paths[action])requestAction(`/api/scans/${current.scan_id}/${paths[action]}`,{method:'POST'})}
+function runAction(action){if(action==='camera'){resumeLiveScanner();return}if(action==='confirm'){confirmMatch(0);return}const paths={reject:'reject',undo:'undo','not-found':'not-found','flag-review':'flag-review'};if(paths[action])requestAction(`/api/scans/${current.scan_id}/${paths[action]}`,{method:'POST'})}
 function renderCapabilityNotice(){const messages=[];if(desktopCapabilities.barcode===false)messages.push('Tracking barcode decoding is unavailable on the desktop.');if(liveUnavailable)messages.push(liveFailure||'This page cannot open a live camera. Scan package will use the phone camera-photo fallback.');const notice=document.getElementById('capability-notice');notice.textContent=messages.join(' ');notice.classList.toggle('show',messages.length>0)}
-function renderStatus(data){setConnection(true,'Desktop connected');const total=data.packages||0;const audited=data.audited||0;const remaining=data.remaining??Math.max(0,total-audited);document.getElementById('progress-text').textContent=`${audited} of ${total} audited`;document.getElementById('remaining-text').textContent=`${remaining} remaining`;document.getElementById('progress-fill').style.width=`${total?Math.round(audited/total*100):0}%`;const alerts=data.alerts||{};document.getElementById('summary').innerHTML=`<span class="chip">${alerts.not_found||0} not logged</span><span class="chip">${alerts.duplicate||0} duplicates</span><span class="chip">${alerts.review||0} review</span>`;desktopCapabilities=data.capabilities||{};renderCapabilityNotice()}
+function renderStatus(data){setConnection(true,'Desktop connected');const total=data.packages||0;const audited=data.audited||0;const remaining=data.remaining??Math.max(0,total-audited);document.getElementById('progress-text').textContent=`${audited} of ${total} audited`;document.getElementById('remaining-text').textContent=`${remaining} remaining`;document.getElementById('progress-fill').style.width=`${total?Math.round(audited/total*100):0}%`;const alerts=data.alerts||{};document.getElementById('summary').innerHTML=`<span class="chip">${alerts.unmatched||0} unmatched</span><span class="chip">${alerts.duplicate||0} duplicates</span><span class="chip">${alerts.review||0} review</span>`;desktopCapabilities=data.capabilities||{};renderCapabilityNotice()}
 async function refresh(force=false){if(requestBusy&&!force)return;try{renderStatus(await api('/api/status'))}catch(error){renderFailure(error)}}
 function normalizedTracking(value){return String(value||'').toUpperCase().replace(/[^A-Z0-9]/g,'')}
 function setLiveLabel(message){liveLabel.textContent=message;scanHint.textContent=message}
@@ -760,6 +789,16 @@ def create_scanner_app(
         require_csrf()
         try:
             return jsonify(coordinator.mark_not_found(scan_id))
+        except KeyError as exc:
+            return jsonify(error=str(exc)), 404
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+
+    @app.post("/api/scans/<scan_id>/flag-review")
+    def flag_review(scan_id: str):
+        require_csrf()
+        try:
+            return jsonify(coordinator.flag_review(scan_id))
         except KeyError as exc:
             return jsonify(error=str(exc)), 404
         except ValueError as exc:

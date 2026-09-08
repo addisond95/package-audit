@@ -81,6 +81,48 @@ def test_confirmation_retry_after_disconnect_does_not_repeat_mutation(session):
     assert session.coordinator.drain_actions() == []
 
 
+def test_phone_can_flag_an_unmatched_tracking_for_desktop_review(session):
+    client = handshake(session)
+    scan = send(
+        session,
+        client,
+        {"id": "scan", "op": "scan", "barcodes": ["1Z000ZZ00000000001"], "formats": ["CODE_128"]},
+    )["result"]
+    assert scan["status"] == "not_found"
+    assert scan["can_mark_not_found"] is True
+    assert session.coordinator.drain_actions()[0].kind == "not_found"
+
+    flagged = send(
+        session,
+        client,
+        {"id": "flag", "op": "not_found", "scan_id": scan["scan_id"]},
+    )["result"]
+    assert flagged["status"] == "flagged"
+    assert flagged["saved"] is True
+    assert session.coordinator.drain_actions()[0].kind == "flag_error"
+
+
+def test_phone_can_flag_a_known_tracking_unit_mismatch(session):
+    client = handshake(session)
+    scan = send(
+        session,
+        client,
+        {"id": "scan", "op": "scan", "barcodes": ["1Z999AA10123456784"], "formats": ["CODE_128"]},
+    )["result"]
+    session.coordinator.drain_actions()
+
+    flagged = send(
+        session,
+        client,
+        {"id": "mismatch", "op": "flag_review", "scan_id": scan["scan_id"]},
+    )["result"]
+
+    assert flagged["status"] == "flagged"
+    assert flagged["unit"] == "1701S"
+    assert flagged["saved"] is True
+    assert session.coordinator.drain_actions()[0].kind == "flag_review"
+
+
 def test_failed_persistence_is_never_acknowledged_as_saved(session):
     session.verify_saved = lambda _result: False
     client = handshake(session)

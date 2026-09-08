@@ -29,13 +29,15 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
     private PreviewView preview;
     private FrameLayout cameraFrame;
     private TextView connection, instructions, unit, details, progress;
-    private Button pair, reconnect, scan, confirm, next, undo, torch;
+    private Button pair, reconnect, scan, confirm, flagError, next, undo, torch;
     private boolean pairingMode, scanning, cameraRunning, startingCamera, foreground, requestInFlight;
     private boolean torchOn;
     private final Map<String, Integer> codeHits = new HashMap<>();
     private final Set<String> previousCodes = new HashSet<>();
     private final Set<String> blockedCodes = new HashSet<>();
-    private int clearFrames;
+    private final TreeMap<String, String> pendingCodes = new TreeMap<>();
+    private int clearFrames, stableFrames;
+    private long pendingSince;
     private JSONObject current, lastSaved;
     private long resultEpoch;
 
@@ -99,6 +101,10 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         confirm.setBackgroundTintList(android.content.res.ColorStateList.valueOf(GREEN));
         confirm.setTextColor(Color.WHITE);
         confirm.setVisibility(View.GONE);
+        flagError = button(layout, "Flag for end review", this::flagCurrentError);
+        flagError.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(181, 88, 22)));
+        flagError.setTextColor(Color.WHITE);
+        flagError.setVisibility(View.GONE);
         next = button(layout, "Scan next package", this::nextPackage);
         next.setVisibility(View.GONE);
         undo = button(layout, "Undo last saved scan", this::undoLast);
@@ -144,7 +150,8 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
     private void preparePairing() {
         ble.forget(); pairingMode = true; scanning = false; current = lastSaved = null;
         requestInFlight = false; resultEpoch++; blockedCodes.clear(); resetDetection();
-        unit.setText(""); details.setText(""); confirm.setVisibility(View.GONE); next.setVisibility(View.GONE);
+        unit.setText(""); details.setText(""); confirm.setVisibility(View.GONE);
+        flagError.setVisibility(View.GONE); next.setVisibility(View.GONE);
         undo.setVisibility(View.GONE); scan.setEnabled(false);
         instructions.setText("Point at the pairing QR inside the Mac's Bluetooth Scanner window.");
         if (!permissions()) requestPermissions(new String[]{Manifest.permission.CAMERA,
@@ -193,7 +200,8 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
     }
 
     private void resetDetection() {
-        codeHits.clear(); previousCodes.clear(); clearFrames = 0;
+        codeHits.clear(); previousCodes.clear(); pendingCodes.clear();
+        clearFrames = 0; stableFrames = 0; pendingSince = 0;
     }
 
     private void focusCenter() {
@@ -209,7 +217,9 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         if (!foreground || !analyzer.enabled) return;
         if (values.isEmpty()) {
             codeHits.clear(); previousCodes.clear();
-            if (++clearFrames >= 3) blockedCodes.clear();
+            if (++clearFrames >= 3) {
+                blockedCodes.clear(); pendingCodes.clear(); stableFrames = 0; pendingSince = 0;
+            }
             return;
         }
         clearFrames = 0;
@@ -237,6 +247,13 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
             instructions.setText("Scan the pairing QR from the Mac, then scan package labels."); return;
         }
         if (!scanning || !ble.ready() || requestInFlight || ble.busy()) return;
+        if (pendingCodes.isEmpty()) pendingSince = android.os.SystemClock.elapsedRealtime();
+        pendingCodes.putAll(stable);
+        stableFrames++;
+        // Keep a short collection window after the first stable code so a
+        // second, harder carrier barcode on the same label can join the scan.
+        if (stableFrames < 3 || android.os.SystemClock.elapsedRealtime() - pendingSince < 450) return;
+        stable.clear(); stable.putAll(pendingCodes);
         if (stable.keySet().stream().anyMatch(value -> value.startsWith("packageaudit:"))) {
             instructions.setText("That is a pairing QR. Point at a package tracking barcode."); return;
         }
@@ -264,7 +281,7 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
     private void updateControls() {
         boolean enabled = ble.ready() && !requestInFlight;
         scan.setEnabled(enabled && (current == null || !"confirm".equals(current.optString("status"))));
-        confirm.setEnabled(enabled); next.setEnabled(enabled); undo.setEnabled(enabled);
+        confirm.setEnabled(enabled); flagError.setEnabled(enabled); next.setEnabled(enabled); undo.setEnabled(enabled);
         if (!pairingMode) scan.setText(scanning ? "Pause scanning" : "Scan packages");
     }
 
@@ -293,19 +310,24 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         String tracking = current.optString("tracking");
         details.setText(current.optString("message") + (tracking.isEmpty() ? "" : "\nTracking …" + tracking.substring(Math.max(0, tracking.length()-4))));
         boolean needsConfirm = "confirm".equals(status);
+        boolean unmatched = "not_found".equals(status);
         confirm.setVisibility(needsConfirm ? View.VISIBLE : View.GONE);
+        flagError.setText(needsConfirm ? "Flag unit mismatch" : "Flag for end review");
+        flagError.setVisibility(needsConfirm || unmatched ? View.VISIBLE : View.GONE);
         confirm.setText("Confirm unit " + loggedUnit);
-        next.setText(needsConfirm ? "Wrong barcode — rescan" : "Scan next package");
+        next.setText(needsConfirm || unmatched ? "Rescan label" : "Scan next package");
         next.setVisibility(View.VISIBLE);
-        if (current.optBoolean("can_undo") && current.optBoolean("saved")) lastSaved = current;
+        if (("matched".equals(status) || "flagged".equals(status) || "duplicate".equals(status))
+                && current.optBoolean("can_undo") && current.optBoolean("saved")) lastSaved = current;
         if ("undo_queued".equals(status) || "rejected".equals(status)) lastSaved = null;
         undo.setVisibility(lastSaved != null ? View.VISIBLE : View.GONE);
         instructions.setText(needsConfirm ? "Check the unit against the box label, then confirm." : "Check the result below.");
         Vibrator vibrator = getSystemService(Vibrator.class);
         if (vibrator != null) vibrator.vibrate(VibrationEffect.createOneShot(needsConfirm ? 35 : 80, VibrationEffect.DEFAULT_AMPLITUDE));
         updateControls();
-        if ("matched".equals(status) && current.optBoolean("saved")) {
-            instructions.setText("Saved. Move to the next package.");
+        if (("matched".equals(status) || "flagged".equals(status)) && current.optBoolean("saved")) {
+            instructions.setText("matched".equals(status)
+                ? "Saved. Move to the next package." : "Flagged for Mac review. Move to the next package.");
             long epoch = resultEpoch;
             main.postDelayed(() -> { if (epoch == resultEpoch && foreground && !requestInFlight) nextPackage(); }, 900);
         }
@@ -325,6 +347,14 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         } catch (Exception error) { details.setText("Scan this package again."); }
     }
 
+    private void flagCurrentError() {
+        if (current == null) return;
+        String status = current.optString("status");
+        if (!"not_found".equals(status) && !"confirm".equals(status)) return;
+        try { sendAction("not_found".equals(status) ? "not_found" : "flag_review", current, null); }
+        catch (Exception error) { details.setText("Could not flag this scan. Try again."); }
+    }
+
     private void sendAction(String op, JSONObject target, String item) throws Exception {
         JSONObject request = BleClient.request(op).put("scan_id", target.getString("scan_id"));
         if (item != null) request.put("item_id", item);
@@ -342,13 +372,15 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
 
     private void nextPackage() {
         if (!ble.ready() || requestInFlight) return;
-        if (current != null && "confirm".equals(current.optString("status"))) {
+        if (current != null && ("confirm".equals(current.optString("status"))
+                || "not_found".equals(current.optString("status")))) {
             try { sendAction("reject", current, null); }
             catch (Exception error) { details.setText("Could not clear the suggestion."); }
             return;
         }
         resultEpoch++; current = null; resetDetection(); scanning = true;
-        unit.setText(""); details.setText(""); confirm.setVisibility(View.GONE); next.setVisibility(View.GONE);
+        unit.setText(""); details.setText(""); confirm.setVisibility(View.GONE);
+        flagError.setVisibility(View.GONE); next.setVisibility(View.GONE);
         instructions.setText("Fill the camera with one tracking barcode. Tap the preview to focus.");
         analyzer.enabled = true;
         if (camera != null) camera.getCameraControl().setZoomRatio(1.0f);

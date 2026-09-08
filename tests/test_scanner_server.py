@@ -79,6 +79,23 @@ def test_confirmation_queues_match_and_replay_is_idempotent(entries):
     assert coordinator.drain_actions() == []
 
 
+def test_known_tracking_can_be_flagged_as_a_unit_mismatch(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    result = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    coordinator.drain_actions()
+
+    flagged = coordinator.flag_review(result["scan_id"])
+    action = coordinator.drain_actions()[0]
+
+    assert flagged["status"] == "flagged"
+    assert flagged["unit"] == "1701S"
+    assert flagged["can_undo"] is True
+    assert action.kind == "flag_review"
+    with pytest.raises(ValueError, match="flagged for review"):
+        coordinator.confirm(result["scan_id"], "one")
+
+
 def test_confirmation_rejects_other_items_and_multi_label_scan(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
@@ -112,17 +129,23 @@ def test_reject_allows_a_fresh_scan_of_the_same_tracking(entries):
     assert second["scan_id"] != first["scan_id"]
 
 
-def test_unknown_tracking_is_logged_not_found_and_can_be_undone(entries):
+def test_unknown_tracking_can_be_flagged_for_review_and_undone(entries):
     coordinator = ScannerCoordinator()
     coordinator.configure("hash", entries)
 
     result = coordinator.process_observation(ScanObservation(barcodes=("1Z000ZZ00000000001",)))
     action = coordinator.drain_actions()[0]
+    flagged = coordinator.mark_not_found(result["scan_id"])
+    flagged_action = coordinator.drain_actions()[0]
     undone = coordinator.undo(result["scan_id"])
 
     assert result["status"] == "not_found"
     assert result["unit"] == ""
+    assert result["can_mark_not_found"] is True
     assert action.kind == "not_found"
+    assert flagged["status"] == "flagged"
+    assert flagged["can_mark_not_found"] is False
+    assert flagged_action.kind == "flag_error"
     assert undone["status"] == "undo_queued"
     assert coordinator.drain_actions()[0].kind == "undo"
 
@@ -391,6 +414,7 @@ def test_phone_page_exposes_one_tap_auto_upload_and_confirmation(entries):
     assert b"Barcode seen" in scanner.data
     assert b"prepareImage" in scanner.data
     assert b"Confirm unit" in scanner.data
+    assert b"Flag unit mismatch" in scanner.data
     assert b"requestTimeoutMs" in scanner.data
     assert b"no picture or Submit step" in scanner.data
     assert b"Take package photo" not in scanner.data

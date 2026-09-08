@@ -54,7 +54,9 @@ protection provided by the encrypted link. Stop/restart the scanner if the QR ma
 ## Requests, saves, and retries
 
 Encrypted requests include `id` (a UUID, maximum 64 characters) and `op`. Operations are `status`, `scan`
-(aligned `barcodes`/`formats`, at most eight), `confirm` (`scan_id`, `item_id`), `reject`, and `undo` (`scan_id`).
+(aligned `barcodes`/`formats`, at most eight), `confirm` (`scan_id`, `item_id`), `not_found`, `flag_review`,
+`reject`, and `undo` (`scan_id`). The two flag operations preserve unmatched-tracking and known-unit-mismatch
+alerts for desktop review without marking the audit row present.
 Responses contain the same id, `ok`, and either `result` or `error`. Audit results reuse the existing scanner
 schema, including logged unit and tracking-only candidates, with `saved` and `progress` added. `confirm`
 is only a suggestion; `matched` with `saved:true` acknowledges a confirmed and persisted row.

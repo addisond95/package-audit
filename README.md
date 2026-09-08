@@ -8,10 +8,10 @@ The primary scanner workflow is a Samsung/Android phone connected directly to a 
 no browser, Wi-Fi, hotspot, internet connection, Cloudflare tunnel, account, or subscription is needed during
 an audit.
 
-> Status: the version 0.9 workflow was tested end-to-end on a Mac and Samsung Galaxy S24 Ultra. Version 0.10.0
-> adds the scanner and reporting improvements below and has passed automated desktop/Android checks; its updated
-> camera behavior still needs the real-label acceptance test described below. It is not yet a notarized macOS
-> release, Play Store release, or formally independently security-audited product.
+> Status: version 0.10.0 completed a successful real package-room audit on a Mac and Samsung Galaxy S24 Ultra.
+> Version 0.11.0 adds the end-of-audit review workflow below and passes the automated, Android release-build,
+> and packaged-Mac checks. Its final S24 hardware acceptance test is still required before field use. It is not
+> yet a notarized macOS release, Play Store release, or formally independently security-audited product.
 
 ## What it does today
 
@@ -23,9 +23,14 @@ an audit.
   unit without reselecting the search field.
 - Saves audit progress locally in SQLite and restores it when the same PDF is reopened.
 - Keeps package errors and double-logged packages in spreadsheet-style editable tables.
+- Keeps unmatched scans in Alerts until you rescan/dismiss them or convert them to a categorized Package Error.
+- Provides built-in and locally customizable error-reason templates for consistent final reporting.
+- Collapses duplicate tracking records into one physical audit row while retaining one Double Logged summary.
 - Classifies Package, Perishable, Keys, Envelope, and Alpha audit entries and shows the type in the audit table.
-- Adds an Audit Notes report section when package errors, duplicate logs, or not-closed-out packages reach the
-  current three-item attention threshold.
+- Produces a percentage-based overall rating, completion/error/duplicate rates, reason breakdown, and targeted
+  follow-up notes instead of fixed raw-count warnings.
+- Blocks final export until open alerts are reviewed and Shelf, BB, Alpha bin, Bin, Perishables, Cage/CG, UG,
+  FCR, and Oddities/other storage are explicitly checked.
 - Exports a text audit report, spreadsheet-safe CSV, and a highlighted copy of the source PDF.
 
 ### Offline Android Bluetooth scanner
@@ -42,7 +47,13 @@ an audit.
   before the Mac marks the row present.
 - Returns to live scanning automatically after a saved confirmation. Flashlight, tap-to-focus, wrong-barcode
   rescan, and undo are available on the phone.
-- Flags reliable unknown tracking numbers as `Not logged` and detects duplicate tracking values for review.
+- Preserves reliable unknown tracking numbers in Alerts and detects duplicate tracking values for review.
+- For an unmatched tracking number, offers **Rescan label** or **Flag for end review** instead of automatically
+  adding a miscanned value to Package Errors.
+- If a known tracking returns the wrong logged unit, offers **Flag unit mismatch** and carries the logged unit
+  and tracking into final review; entering the correct unit generates the complete mislog reason automatically.
+- Briefly collects stable codes from multi-barcode labels so USPS/FedEx or other carrier values are all checked
+  against the audit before the result is decided.
 - Confirms the SQLite save on the Mac before it tells the phone that a package is saved. Reconnect retries use
   idempotent request IDs so an interrupted confirmation is not applied twice.
 
@@ -110,7 +121,7 @@ public Wi-Fi, mobile data, and hotspot configuration do not affect Bluetooth sca
 The signed installer produced by this workspace is:
 
 ```text
-dist/PackageAuditScanner-0.10.0.apk
+dist/PackageAuditScanner-0.11.0.apk
 ```
 
 Enable **USB debugging** in Android Developer options, connect an unlocked phone with a USB data cable, approve
@@ -119,7 +130,7 @@ the Mac's debugging key, and run:
 ```bash
 cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
 adb devices -l
-adb install -r dist/PackageAuditScanner-0.10.0.apk
+adb install -r dist/PackageAuditScanner-0.11.0.apk
 ```
 
 The device must display `device` in the first command. Choose **Transferring files / Android Auto** for the USB
@@ -138,7 +149,10 @@ The scanner deliberately prioritizes correctness over guessing:
 - A full tracking number must exactly match an audit record before the app offers a unit to confirm.
 - If the audit has only a shortened tracking value, the app does not infer a full match; use desktop search/manual
   verification instead.
-- A readable tracking number absent from the audit creates a `Not logged` package-error record.
+- A readable tracking number absent from the audit creates a review alert. Rescan it if needed, or flag it for
+  end review and convert it to a categorized Package Error with its full tracking number retained.
+- A matching tracking with the wrong unit on the physical label can be flagged as a unit mismatch without
+  confirming the package present.
 - A tracking number logged under more than one audit item is treated as a duplicate for review.
 - Damaged, poorly lit, unsupported, or multi-label barcodes may need a rescan or manual audit entry. A scan never
   silently marks an arbitrary row.
@@ -166,6 +180,9 @@ Available exports:
 - Audit report (`.txt`)
 - Spreadsheet-safe raw audit data (`.csv`)
 - Highlighted copy of the source PDF
+
+Before any export, all open scanner alerts must be reviewed. The final area checklist then requires confirmation
+of every configured storage area; completed checks are saved with that audit so interrupted reviews can resume.
 
 Source PDFs, generated reports, APKs, build products, and signing material are ignored by Git to reduce the
 risk of committing resident or credential data.
@@ -270,7 +287,7 @@ package-audit/
 
 The best next work should be driven by observations from real audits. In priority order:
 
-1. **Operational polish:** measure the v0.10 dual-engine scanner against the real label mix, capturing scan
+1. **Operational polish:** measure the v0.11 dual-engine scanner against the real label mix, capturing scan
    latency, remaining misses, glare/damage conditions, and confusing wording during several audit sessions.
 2. **Scan quality and recovery:** use those missed-label examples to tune supported formats, camera behavior,
    guidance for multi-label/damaged labels, and reconnect handling without weakening exact matching.
@@ -285,6 +302,9 @@ The best next work should be driven by observations from real audits. In priorit
 
 ## Version history
 
+- **v0.11.0** — final-area export checklist, deferred/categorized alert review with reusable templates,
+  percentage-based audit assessment, one-row physical handling for duplicate logs, multi-barcode collection,
+  and phone-side unmatched/mislogged-unit review actions.
 - **v0.10.0** — bundled on-device ML Kit plus ZXing fallback, higher-resolution scanning, auto-zoom/refocus and
   aiming guide, package-type classification, meaningful special-item report labels, and threshold-driven Audit
   Notes.

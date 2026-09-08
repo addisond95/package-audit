@@ -16,10 +16,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QColorDialog,
+    QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -33,13 +36,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.audit_dialogs import AlertResolutionDialog, AuditAreaChecklistDialog
 from app.audit_report import write_audit_report
 from app.bluetooth_scanner import BluetoothPairingDialog, BluetoothScanner
 from app.constants import (
     APP_DIR,
     APP_NAME,
+    AUDIT_AREAS,
     CARRIER_OPTIONS,
     DB_FILENAME,
+    DEFAULT_ERROR_TEMPLATES,
     DEFAULT_HIGHLIGHT_RGBA,
     LOCATION_OPTIONS,
     MISSING_LAST4,
@@ -119,6 +125,7 @@ class PackageAuditApp(QMainWindow):
         self.scanner_undo: dict[str, dict] = {}
         self.scanner_item_states: dict[str, str] = {}
         self.open_alert_count = 0
+        self.duplicate_suppressed_ids: set[str] = set()
 
         self._build_menu()
         self._build_ui()
@@ -371,7 +378,8 @@ class PackageAuditApp(QMainWindow):
         layout.setSpacing(10)
 
         buttons = QHBoxLayout()
-        self._add_button(buttons, "Resolve Selected", self.resolve_selected_alerts)
+        self._add_button(buttons, "Add Selected to Package Errors", self.review_selected_alerts, "primary")
+        self._add_button(buttons, "Dismiss / Rescan Selected", self.resolve_selected_alerts)
         self._add_button(buttons, "Reopen Selected", self.reopen_selected_alerts)
         buttons.addStretch(1)
 
@@ -389,6 +397,16 @@ class PackageAuditApp(QMainWindow):
 
         layout.addLayout(buttons)
         layout.addWidget(self.alerts_table)
+
+        template_row = QHBoxLayout()
+        template_row.addWidget(QLabel("Error reason templates:"))
+        self.error_template_combo = QComboBox()
+        self.error_template_combo.setMinimumWidth(430)
+        template_row.addWidget(self.error_template_combo, stretch=1)
+        self._add_button(template_row, "Add Template", self.add_error_template)
+        self._add_button(template_row, "Delete Custom Template", self.delete_error_template, "danger")
+        layout.addLayout(template_row)
+        self._refresh_error_templates()
         return tab
 
     def _build_shortcuts(self) -> None:
@@ -457,6 +475,7 @@ class PackageAuditApp(QMainWindow):
         self.pdf_path = path
         self.pdf_hash = pdf_digest
         self.entries = entries
+        self.duplicate_suppressed_ids.clear()
 
         saved = self.db.load_state(self.pdf_hash)
         for entry in self.entries:
@@ -481,6 +500,8 @@ class PackageAuditApp(QMainWindow):
 
         self.filtered_indices = []
         for idx, entry in enumerate(self.entries):
+            if entry.item_id in self.duplicate_suppressed_ids:
+                continue
             if query and query not in entry.search_text:
                 continue
             if unchecked_only and entry.audited:
@@ -519,10 +540,11 @@ class PackageAuditApp(QMainWindow):
         self._update_summary()
 
     def _update_summary(self) -> None:
-        total = len(self.entries)
-        done = sum(1 for entry in self.entries if entry.audited)
+        physical_entries = self._scanner_entries()
+        total = len(physical_entries)
+        done = sum(1 for entry in physical_entries if entry.audited)
         remaining = total - done
-        unique_units = len({entry.unit for entry in self.entries})
+        unique_units = len({entry.unit for entry in physical_entries})
         showing = len(self.filtered_indices)
 
         self.audited_chip.setText(self._chip_text(done, f"of {total} audited"))
@@ -759,7 +781,7 @@ class PackageAuditApp(QMainWindow):
                     self.errors_table,
                     [row.unit, row.location, row.carrier, row.tracking, row.last4, row.note],
                 )
-                if row.note.casefold() == "not logged":
+                if row.note.casefold().startswith("not logged"):
                     for column in range(ERROR_COLUMNS):
                         item = self.errors_table.item(self.errors_table.rowCount() - 1, column)
                         if item:
@@ -838,7 +860,7 @@ class PackageAuditApp(QMainWindow):
                 saved.get(item_id) for item_id in result["related_item_ids"]
             ):
                 return False
-        if status in {"matched", "not_found", "duplicate", "rejected", "undo_queued"}:
+        if status in {"matched", "not_found", "flagged", "duplicate", "rejected", "undo_queued"}:
             expected = "undone" if status == "undo_queued" else status
             row = self.db.conn.execute(
                 "SELECT status FROM scanner_events WHERE pdf_hash = ? AND scan_id = ?",
@@ -935,6 +957,9 @@ class PackageAuditApp(QMainWindow):
     def _entry_carrier(entry: AuditEntry) -> str:
         return normalize_carrier(entry.package.split(" - ", 1)[0]) or "PKG"
 
+    def _scanner_entries(self) -> list[AuditEntry]:
+        return [entry for entry in self.entries if entry.item_id not in self.duplicate_suppressed_ids]
+
     def _configure_scanner_for_audit(self) -> None:
         if not self.pdf_hash:
             return
@@ -944,21 +969,27 @@ class PackageAuditApp(QMainWindow):
             self.entries,
         )
         entries_by_id = {entry.item_id: entry for entry in self.entries}
+        suppressed: set[str] = set()
         for tracking, records in self.scanner_coordinator.duplicate_groups():
             item_ids = tuple(record.item_id for record in records)
             units = sorted({record.unit for record in records})
-            for record in records:
+            canonical = records[0]
+            for record in records[1:]:
+                suppressed.add(record.item_id)
                 entry = entries_by_id[record.item_id]
-                self.db.add_double_logged_if_missing(
-                    self.pdf_hash,
-                    DoubleLoggedPackage(
-                        unit=entry.unit,
-                        location="",
-                        carrier=self._entry_carrier(entry),
-                        last4=record.last4,
-                        tracking=tracking,
-                    ),
-                )
+                entry.audited = True
+                self.db.set_state(self.pdf_hash, entry.item_id, True)
+            canonical_entry = entries_by_id[canonical.item_id]
+            self.db.replace_tracking_duplicate(
+                self.pdf_hash,
+                DoubleLoggedPackage(
+                    unit=" / ".join(units),
+                    location="",
+                    carrier=self._entry_carrier(canonical_entry),
+                    last4=tracking[-4:],
+                    tracking=tracking,
+                ),
+            )
             self.db.upsert_scanner_alert(
                 self.pdf_hash,
                 ScannerAlert(
@@ -972,6 +1003,8 @@ class PackageAuditApp(QMainWindow):
                     item_ids=item_ids,
                 ),
             )
+        self.duplicate_suppressed_ids = suppressed
+        self.scanner_coordinator.configure(self.pdf_hash, self.entries)
         self._populate_double_table(self.db.load_double_logged(self.pdf_hash))
         self._refresh_alerts()
 
@@ -1025,34 +1058,71 @@ class PackageAuditApp(QMainWindow):
             tracking = normalize_tracking(action.decision.tracking)
             alert_key = f"not_found:{tracking or action.scan_id}"
             existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
-            package_error = PackageError(
-                unit=action.decision.unit,
-                location="",
-                carrier=action.decision.carrier,
-                last4=tracking[-4:] if tracking else "",
-                note="Not logged",
-                tracking=tracking,
-            )
-            inserted = self.db.add_package_error_if_missing(self.pdf_hash, package_error)
             self.db.upsert_scanner_alert(
                 self.pdf_hash,
                 ScannerAlert(
                     alert_key=alert_key,
-                    kind="not_found",
+                    kind="unmatched",
+                    severity="review",
+                    unit=action.decision.unit,
+                    carrier=action.decision.carrier,
+                    tracking=tracking,
+                    last4=tracking[-4:] if tracking else "",
+                    message=(
+                        "Tracking was not found in the loaded audit. Rescan/dismiss it or add a "
+                        "categorized package error before export."
+                    ),
+                ),
+            )
+            if alert_key not in existing_keys:
+                history["alerts"].append(alert_key)
+            self.db.resolve_scanner_alert(self.pdf_hash, f"review:{action.scan_id}")
+            self._save_scanner_event(action)
+            return
+
+        if action.kind == "flag_error":
+            tracking = normalize_tracking(action.decision.tracking)
+            alert_key = f"not_found:{tracking or action.scan_id}"
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="unmatched",
                     severity="error",
                     unit=action.decision.unit,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
-                    message="Package is not present in the loaded audit. Logged as Not logged.",
+                    message="Phone flagged this unmatched tracking number for end-of-audit review.",
                 ),
             )
-            if inserted:
-                history["package_error"] = package_error
+            self._save_scanner_event(action, status="flagged")
+            return
+
+        if action.kind == "flag_review":
+            tracking = normalize_tracking(action.decision.tracking)
+            alert_key = f"unit_mismatch:{tracking or action.scan_id}"
+            existing_keys = {alert.alert_key for alert in self.db.load_scanner_alerts(self.pdf_hash)}
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="mislog",
+                    severity="error",
+                    unit=action.decision.unit,
+                    carrier=action.decision.carrier,
+                    tracking=tracking,
+                    last4=tracking[-4:] if tracking else "",
+                    message=(
+                        f"Tracking is logged for unit {action.decision.unit}, but the phone operator "
+                        "flagged a unit mismatch."
+                    ),
+                    item_ids=action.decision.related_item_ids,
+                ),
+            )
             if alert_key not in existing_keys:
                 history["alerts"].append(alert_key)
-            self.db.resolve_scanner_alert(self.pdf_hash, f"review:{action.scan_id}")
-            self._save_scanner_event(action)
+            self._save_scanner_event(action, status="flagged")
             return
 
         if action.kind == "duplicate":
@@ -1062,27 +1132,18 @@ class PackageAuditApp(QMainWindow):
             related = [entry for entry in self.entries if entry.item_id in action.decision.related_item_ids]
             related_units = {entry.unit for entry in related}
             for entry in related:
+                history["audited"].setdefault(entry.item_id, entry.audited)
+                entry.audited = True
+                self.db.set_state(self.pdf_hash, entry.item_id, True)
+            if related:
                 duplicate_row = DoubleLoggedPackage(
-                    unit=entry.unit,
+                    unit=" / ".join(sorted(related_units)),
                     location="",
-                    carrier=self._entry_carrier(entry),
-                    last4=tracking[-4:] if tracking else entry.last4,
+                    carrier=self._entry_carrier(related[0]),
+                    last4=tracking[-4:] if tracking else related[0].last4,
                     tracking=tracking,
                 )
-                inserted = self.db.add_double_logged_if_missing(self.pdf_hash, duplicate_row)
-                if inserted:
-                    history["double_rows"].append(duplicate_row)
-            if action.decision.unit and action.decision.unit not in related_units:
-                duplicate_row = DoubleLoggedPackage(
-                    unit=action.decision.unit,
-                    location="",
-                    carrier=action.decision.carrier,
-                    last4=tracking[-4:] if tracking else "",
-                    tracking=tracking,
-                )
-                inserted = self.db.add_double_logged_if_missing(self.pdf_hash, duplicate_row)
-                if inserted:
-                    history["double_rows"].append(duplicate_row)
+                self.db.replace_tracking_duplicate(self.pdf_hash, duplicate_row)
             self.db.upsert_scanner_alert(
                 self.pdf_hash,
                 ScannerAlert(
@@ -1225,6 +1286,71 @@ class PackageAuditApp(QMainWindow):
         self._refresh_alerts()
         self._refresh_table()
 
+    def _selected_alerts(self) -> list[ScannerAlert]:
+        if not self.pdf_hash:
+            return []
+        selected_keys = {
+            marker.data(ALERT_KEY_ROLE)
+            for row in {index.row() for index in self.alerts_table.selectedIndexes()}
+            if (marker := self.alerts_table.item(row, 0)) is not None
+        }
+        return [
+            alert
+            for alert in self.db.load_scanner_alerts(self.pdf_hash, include_resolved=False)
+            if alert.alert_key in selected_keys
+        ]
+
+    def _error_templates(self) -> list[str]:
+        custom = self.db.load_custom_error_templates()
+        return list(dict.fromkeys([*DEFAULT_ERROR_TEMPLATES, *custom]))
+
+    def _refresh_error_templates(self) -> None:
+        if not hasattr(self, "error_template_combo"):
+            return
+        current = self.error_template_combo.currentText()
+        self.error_template_combo.clear()
+        self.error_template_combo.addItems(self._error_templates())
+        if current:
+            self.error_template_combo.setCurrentText(current)
+
+    def add_error_template(self) -> None:
+        message, accepted = QInputDialog.getText(
+            self,
+            "Add error reason template",
+            "Reusable error reason:",
+        )
+        if accepted and self.db.add_error_template(message):
+            self._refresh_error_templates()
+            self.error_template_combo.setCurrentText(" ".join(message.split()))
+
+    def delete_error_template(self) -> None:
+        message = self.error_template_combo.currentText()
+        if not message or message in DEFAULT_ERROR_TEMPLATES:
+            QMessageBox.information(
+                self,
+                "Built-in template",
+                "Built-in templates cannot be deleted. Add a custom template if different wording is needed.",
+            )
+            return
+        self.db.delete_error_template(message)
+        self._refresh_error_templates()
+
+    def review_selected_alerts(self) -> None:
+        alerts = self._selected_alerts()
+        if not alerts:
+            QMessageBox.information(self, "Select an alert", "Select one or more open alerts to review.")
+            return
+        self.save_error_rows()
+        for alert in alerts:
+            dialog = AlertResolutionDialog(alert, self._error_templates(), self)
+            if dialog.exec() != QDialog.Accepted:
+                break
+            self.db.add_package_error_if_missing(self.pdf_hash, dialog.package_error)
+            self.db.resolve_scanner_alert(self.pdf_hash, alert.alert_key)
+        self._populate_errors_table(self.db.load_package_errors(self.pdf_hash))
+        self._refresh_alerts()
+        self._refresh_table()
+
     def resolve_selected_alerts(self) -> None:
         self._set_selected_alerts_resolved(True)
 
@@ -1252,8 +1378,7 @@ class PackageAuditApp(QMainWindow):
         self._populate_double_table([])
         self.scanner_undo.clear()
         self.scanner_coordinator.configure(self.pdf_hash, self.entries, reset_scans=True)
-        self._refresh_alerts()
-        self._refresh_table()
+        self._configure_scanner_for_audit()
         self.statusBar().showMessage("Current audit data cleared.", 5000)
 
     def clear_manual_sections(self) -> None:
@@ -1274,10 +1399,8 @@ class PackageAuditApp(QMainWindow):
 
     # --------------------------------------------------------------- exports
     def export_audit_txt(self) -> None:
-        if not self._require_entries():
+        if not self._require_entries() or not self._prepare_export():
             return
-        self.save_error_rows()
-        self.save_double_rows()
 
         default_name = (
             f"{self.pdf_path.stem}_audit_report.txt" if self.pdf_path else "package_audit_report.txt"
@@ -1303,7 +1426,7 @@ class PackageAuditApp(QMainWindow):
         self._exported(path_str)
 
     def export_csv(self) -> None:
-        if not self._require_entries():
+        if not self._require_entries() or not self._prepare_export():
             return
 
         default_name = f"{self.pdf_path.stem}_audit.csv" if self.pdf_path else "package_audit.csv"
@@ -1349,7 +1472,7 @@ class PackageAuditApp(QMainWindow):
         self._exported(path_str)
 
     def export_highlighted_pdf(self) -> None:
-        if not self.pdf_path or not self._require_entries():
+        if not self.pdf_path or not self._require_entries() or not self._prepare_export():
             return
 
         default_name = f"{self.pdf_path.stem}_highlighted.pdf"
@@ -1412,6 +1535,34 @@ class PackageAuditApp(QMainWindow):
         self._exported(output_str)
 
     # --------------------------------------------------------------- helpers
+    def _prepare_export(self) -> bool:
+        """Require resolved alerts and a complete physical-area confirmation."""
+        if not self.pdf_hash:
+            return False
+        self.save_error_rows()
+        self.save_double_rows()
+        open_alerts = self.db.load_scanner_alerts(self.pdf_hash, include_resolved=False)
+        if open_alerts:
+            self.tabs.setCurrentIndex(3)
+            QMessageBox.warning(
+                self,
+                "Review alerts before export",
+                f"{len(open_alerts)} open scanner alert{'s' if len(open_alerts) != 1 else ''} "
+                "must be reviewed first. Add each real issue to Package Errors or dismiss it after "
+                "verification, then export again.",
+            )
+            return False
+        saved = self.db.load_area_checks(self.pdf_hash)
+        dialog = AuditAreaChecklistDialog(saved, self)
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        required = {key for key, _label in AUDIT_AREAS}
+        checked = dialog.checked_areas
+        if checked != required:
+            return False
+        self.db.replace_area_checks(self.pdf_hash, checked)
+        return True
+
     def _require_pdf(self) -> bool:
         if not self.pdf_hash:
             QMessageBox.information(self, "No PDF loaded", "Open a PDF first.")

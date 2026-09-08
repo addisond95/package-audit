@@ -1,19 +1,16 @@
 """Plain-text audit report generation.
 
-Produces the audit's open-package, error, duplicate, and threshold-driven note
+Produces the audit's open-package, error, duplicate, and percentage-based note
 sections.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from app.constants import (
-    DOUBLE_LOGGED_NOTE_THRESHOLD,
-    NOT_CLOSED_OUT_NOTE_THRESHOLD,
-    PACKAGE_ERROR_NOTE_THRESHOLD,
-)
+from app.audit_workflow import assess_audit, canonical_audit_entries
 from app.export_utils import atomic_output_path
 from app.models import (
     AuditEntry,
@@ -48,8 +45,9 @@ def make_audit_report(
     double_logged: list[DoubleLoggedPackage],
     source_pdf_name: str = "",
 ) -> str:
+    canonical_entries, _ = canonical_audit_entries(entries)
     unchecked = sorted(
-        (e for e in entries if not e.audited),
+        (e for e in canonical_entries if not e.audited),
         key=lambda e: (unit_sort_key(e.unit), e.last4),
     )
     package_errors = sorted(
@@ -117,27 +115,50 @@ def make_audit_report(
     )
 
     # ── Section 4 ──────────────────────────────────────────────────────────
-    audit_notes: list[list[str]] = []
-    if len(package_errors) >= PACKAGE_ERROR_NOTE_THRESHOLD:
+    assessment = assess_audit(canonical_entries, package_errors, double_logged)
+    reviewed = assessment.total - assessment.not_closed
+    audit_notes: list[list[str]] = [
+        [f"Overall result: {assessment.rating} ({assessment.score:.1f}% quality score)."],
+        [
+            f"Completion: {reviewed} of {assessment.total} physical packages accounted for "
+            f"({assessment.completion_rate:.1f}%)."
+        ],
+        [
+            f"Package errors: {assessment.errors} of {assessment.total} "
+            f"({assessment.error_rate:.1f}% of the audit)."
+        ],
+        [
+            f"Duplicate logs: {assessment.double_logs} of {assessment.total} "
+            f"({assessment.duplicate_rate:.1f}% of the audit)."
+        ],
+    ]
+    if package_errors:
+        reasons = Counter(row.note.strip() or "Unspecified" for row in package_errors)
         audit_notes.append(
             [
-                f"{len(package_errors)} package errors recorded. Staff should take extra care to verify "
-                "the unit, package type, tracking number, and storage location when logging packages."
+                "Error breakdown: "
+                + "; ".join(f"{reason} ({count})" for reason, count in reasons.most_common())
+                + "."
             ]
         )
-    if len(double_logged) >= DOUBLE_LOGGED_NOTE_THRESHOLD:
+    if assessment.not_closed:
         audit_notes.append(
             [
-                f"{len(double_logged)} double-logged packages recorded. Staff should take extra care to "
-                "search for an existing entry before logging a package again."
+                f"Follow-up: resolve the {assessment.not_closed} unclosed physical package"
+                f"{'s' if assessment.not_closed != 1 else ''} and reinforce pickup close-out procedure."
             ]
         )
-    if len(unchecked) >= NOT_CLOSED_OUT_NOTE_THRESHOLD:
+    if assessment.errors:
         audit_notes.append(
-            [
-                f"{len(unchecked)} packages were picked up but not closed out. Staff should take extra care "
-                "to close out packages promptly when residents collect them."
-            ]
+            ["Follow-up: review the categorized package errors below with staff and address repeated causes."]
+        )
+    if assessment.double_logs:
+        audit_notes.append(
+            ["Follow-up: search for an existing tracking entry before relogging incoming packages."]
+        )
+    if not (assessment.not_closed or assessment.errors or assessment.double_logs):
+        audit_notes.append(
+            ["No package exceptions were recorded. Current receiving and close-out practices were effective."]
         )
 
     lines.append("")
