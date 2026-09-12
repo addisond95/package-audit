@@ -218,6 +218,7 @@ def test_scanner_alert_upsert_resolution_and_clear(db):
         severity="warning",
         unit="1701s",
         label_unit="1701",
+        location="bb",
         carrier="ups",
         tracking="track1234",
         message="Duplicate tracking",
@@ -230,6 +231,7 @@ def test_scanner_alert_upsert_resolution_and_clear(db):
     assert len(alerts) == 1
     assert alerts[0].item_ids == ("one", "two")
     assert alerts[0].label_unit == "1701"
+    assert alerts[0].location == "BB"
     db.resolve_scanner_alert("hash-a", alert.alert_key)
     assert db.load_scanner_alerts("hash-a", include_resolved=False) == []
     assert db.load_scanner_alerts("hash-a")[0].resolved is True

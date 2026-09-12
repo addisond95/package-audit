@@ -56,12 +56,13 @@ protection provided by the encrypted link. Stop/restart the scanner if the QR ma
 
 Encrypted requests include `id` (a UUID, maximum 64 characters) and `op`. Operations are `status`, `scan`
 (aligned `barcodes`/`formats`, at most eight, plus optional aligned `units`/`unit_confidences`, at most twelve),
+`manual_alert` (the same decoded fields plus one approved package `location`),
 `confirm` (`scan_id`, `item_id`), `not_found`, `flag_review`, `reject`, and `undo` (`scan_id`). Omitting `units`
 is an intentional tracking-only scan. The two flag operations preserve unmatched-tracking and unit-review
 alerts without marking the audit row present. Native unit outcomes include `verified`, `unit_not_read`, and
 `unit_mismatch`; an unreadable unit can still be confirmed manually by the operator.
 Responses contain the same id, `ok`, and either `result` or `error`. Audit results reuse the existing scanner
-schema, including logged/scanned units and exact tracking candidates, with `saved` and `progress` added. `confirm`
+schema, including logged/scanned units, package location, and exact tracking candidates, with `saved` and `progress` added. `confirm`
 is only a suggestion; `matched` with `saved:true` acknowledges a confirmed and persisted row.
 
 Python drains the action queue synchronously and verifies saved SQLite state/event status before responding.

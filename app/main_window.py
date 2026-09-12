@@ -83,6 +83,7 @@ ALERT_HEADERS = [
     "Type",
     "Audit Unit",
     "Label Unit",
+    "Location",
     "Carrier",
     "Tracking",
     "Last 4",
@@ -104,6 +105,12 @@ ALERT_COLORS = {
     "review": QColor(242, 201, 76, 95),
 }
 LOGGER = logging.getLogger(LOGGER_NAME)
+
+
+def audit_export_basename(now: datetime | None = None) -> str:
+    """Return the standard local-date audit export name without an extension."""
+    value = now or datetime.now().astimezone()
+    return value.strftime("%Y_%m%d_package_audit")
 
 
 class PackageAuditApp(QMainWindow):
@@ -403,9 +410,9 @@ class PackageAuditApp(QMainWindow):
         self.alerts_table.setAlternatingRowColors(True)
         self.alerts_table.verticalHeader().setVisible(False)
         self.alerts_table.verticalHeader().setDefaultSectionSize(36)
-        for column, width in enumerate((80, 110, 90, 90, 90, 210, 75, 500, 150)):
+        for column, width in enumerate((80, 110, 90, 90, 95, 90, 210, 75, 500, 150)):
             self.alerts_table.setColumnWidth(column, width)
-        self.alerts_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
+        self.alerts_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
 
         layout.addLayout(buttons)
         layout.addWidget(self.alerts_table)
@@ -1006,7 +1013,7 @@ class PackageAuditApp(QMainWindow):
                 self.pdf_hash,
                 DoubleLoggedPackage(
                     unit=" / ".join(units),
-                    location="",
+                    location=canonical.location,
                     carrier=self._entry_carrier(canonical_entry),
                     last4=tracking[-4:],
                     tracking=tracking,
@@ -1019,6 +1026,7 @@ class PackageAuditApp(QMainWindow):
                     kind="duplicate",
                     severity="warning",
                     unit=" / ".join(units),
+                    location=canonical.location,
                     tracking=tracking,
                     last4=tracking[-4:],
                     message="The same tracking number appears multiple times in this audit.",
@@ -1094,6 +1102,7 @@ class PackageAuditApp(QMainWindow):
                     kind="unmatched",
                     severity="review",
                     label_unit=scanned_unit,
+                    location=action.decision.location,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
@@ -1121,12 +1130,37 @@ class PackageAuditApp(QMainWindow):
                     kind="unmatched",
                     severity="error",
                     label_unit=scanned_unit,
+                    location=action.decision.location,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
                     message="Phone flagged this unmatched tracking number for end-of-audit review.",
                 ),
             )
+            self._save_scanner_event(action, status="flagged")
+            return
+
+        if action.kind == "manual_alert":
+            tracking = normalize_tracking(action.decision.tracking)
+            scanned_unit = action.decision.scanned_units[0] if action.decision.scanned_units else ""
+            alert_key = f"manual:{action.scan_id}"
+            self.db.upsert_scanner_alert(
+                self.pdf_hash,
+                ScannerAlert(
+                    alert_key=alert_key,
+                    kind="manual",
+                    severity="error",
+                    unit=action.decision.unit,
+                    label_unit=scanned_unit,
+                    location=action.location or action.decision.location,
+                    carrier=action.decision.carrier,
+                    tracking=tracking,
+                    last4=tracking[-4:] if tracking else "",
+                    message="Phone operator opened an alert for this package.",
+                    item_ids=action.decision.related_item_ids,
+                ),
+            )
+            history["alerts"].append(alert_key)
             self._save_scanner_event(action, status="flagged")
             return
 
@@ -1142,6 +1176,7 @@ class PackageAuditApp(QMainWindow):
                     severity="review",
                     unit=action.decision.unit,
                     label_unit=(action.decision.scanned_units[0] if action.decision.scanned_units else ""),
+                    location=action.decision.location,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
@@ -1170,6 +1205,7 @@ class PackageAuditApp(QMainWindow):
                     severity="error",
                     unit=action.decision.unit,
                     label_unit=(action.decision.scanned_units[0] if action.decision.scanned_units else ""),
+                    location=action.decision.location,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
@@ -1202,6 +1238,7 @@ class PackageAuditApp(QMainWindow):
                     severity="error",
                     unit=action.decision.unit,
                     label_unit=(action.decision.scanned_units[0] if action.decision.scanned_units else ""),
+                    location=action.decision.location,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
@@ -1235,7 +1272,7 @@ class PackageAuditApp(QMainWindow):
             if related:
                 duplicate_row = DoubleLoggedPackage(
                     unit=" / ".join(sorted(related_units)),
-                    location="",
+                    location=action.decision.location,
                     carrier=self._entry_carrier(related[0]),
                     last4=tracking[-4:] if tracking else related[0].last4,
                     tracking=tracking,
@@ -1248,6 +1285,7 @@ class PackageAuditApp(QMainWindow):
                     kind="duplicate",
                     severity="warning",
                     unit=" / ".join(sorted({*related_units, action.decision.unit} - {""})),
+                    location=action.decision.location,
                     carrier=action.decision.carrier,
                     tracking=tracking,
                     last4=tracking[-4:] if tracking else "",
@@ -1269,6 +1307,7 @@ class PackageAuditApp(QMainWindow):
                     kind="review",
                     severity="review",
                     unit=action.decision.unit,
+                    location=action.decision.location,
                     carrier=action.decision.carrier,
                     tracking=action.decision.tracking,
                     last4=action.decision.tracking[-4:] if action.decision.tracking else "",
@@ -1302,6 +1341,7 @@ class PackageAuditApp(QMainWindow):
                     "candidates": candidates,
                     "unit_status": action.decision.unit_status,
                     "scanned_units": list(action.decision.scanned_units),
+                    "location": action.location or action.decision.location,
                 },
             ),
         )
@@ -1372,6 +1412,7 @@ class PackageAuditApp(QMainWindow):
                 alert.kind.replace("_", " ").title(),
                 alert.unit,
                 alert.label_unit,
+                alert.location,
                 alert.carrier,
                 alert.tracking,
                 alert.last4,
@@ -1536,9 +1577,7 @@ class PackageAuditApp(QMainWindow):
         if not self._require_entries() or not self._prepare_export():
             return
 
-        default_name = (
-            f"{self.pdf_path.stem}_audit_report.txt" if self.pdf_path else "package_audit_report.txt"
-        )
+        default_name = f"{audit_export_basename()}.txt"
         path_str, _ = QFileDialog.getSaveFileName(
             self, "Export Audit TXT", default_name, "Text Files (*.txt)"
         )
@@ -1564,7 +1603,7 @@ class PackageAuditApp(QMainWindow):
         if not self._require_entries() or not self._prepare_export():
             return
 
-        default_name = f"{self.pdf_path.stem}_audit.csv" if self.pdf_path else "package_audit.csv"
+        default_name = f"{audit_export_basename()}.csv"
         path_str, _ = QFileDialog.getSaveFileName(self, "Export Audit CSV", default_name, "CSV Files (*.csv)")
         if not path_str or not self._validate_export_path(Path(path_str)):
             return
@@ -1610,7 +1649,7 @@ class PackageAuditApp(QMainWindow):
         if not self.pdf_path or not self._require_entries() or not self._prepare_export():
             return
 
-        default_name = f"{self.pdf_path.stem}_highlighted.pdf"
+        default_name = f"{audit_export_basename()}.pdf"
         output_str, _ = QFileDialog.getSaveFileName(
             self, "Export Highlighted PDF", default_name, "PDF Files (*.pdf)"
         )

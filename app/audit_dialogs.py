@@ -87,6 +87,7 @@ class AlertResolutionDialog(QDialog):
         self.location = QComboBox()
         self.location.addItems(LOCATION_OPTIONS)
         self.location.setEditable(True)
+        self.location.setCurrentText(alert.location)
         self.carrier = QComboBox()
         self.carrier.addItems(CARRIER_OPTIONS)
         self.carrier.setEditable(True)

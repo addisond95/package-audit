@@ -136,7 +136,7 @@ class ScannerBluetoothSession:
         op = request.get("op")
         if op == "status":
             return self.coordinator.status()
-        if op == "scan":
+        if op in {"scan", "manual_alert"}:
             codes, formats = request.get("barcodes"), request.get("formats")
             units = request.get("units", [])
             unit_confidences = request.get("unit_confidences", [])
@@ -160,16 +160,27 @@ class ScannerBluetoothSession:
                 )
             ):
                 raise ValueError("Invalid tracking barcode. Scan again.")
-            result = self.coordinator.process_observation(
-                observation_from_barcodes(
-                    tuple(codes),
-                    tuple(formats),
-                    tuple(units),
-                    tuple(float(value) for value in unit_confidences),
-                    unit_scan_attempted="units" in request,
-                ),
-                expected_generation=self.generation,
+            observation = observation_from_barcodes(
+                tuple(codes),
+                tuple(formats),
+                tuple(units),
+                tuple(float(value) for value in unit_confidences),
+                unit_scan_attempted="units" in request,
             )
+            if op == "manual_alert":
+                location = request.get("location")
+                if not isinstance(location, str) or not 1 <= len(location) <= 32:
+                    raise ValueError("Choose a package location from the phone list.")
+                result = self.coordinator.create_manual_alert(
+                    observation,
+                    location,
+                    expected_generation=self.generation,
+                )
+            else:
+                result = self.coordinator.process_observation(
+                    observation,
+                    expected_generation=self.generation,
+                )
         else:
             scan_id = request.get("scan_id")
             if not isinstance(scan_id, str) or len(scan_id) > 64:

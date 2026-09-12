@@ -166,6 +166,7 @@ class AuditDatabase:
                 """
             )
             self._ensure_column("scanner_alerts", "label_unit", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("scanner_alerts", "location", "TEXT NOT NULL DEFAULT ''")
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS scanner_feedback (
@@ -583,14 +584,15 @@ class AuditDatabase:
             self.conn.execute(
                 """
                 INSERT INTO scanner_alerts (
-                    pdf_hash, alert_key, kind, severity, unit, label_unit, carrier,
+                    pdf_hash, alert_key, kind, severity, unit, label_unit, location, carrier,
                     tracking, last4, message, item_ids, resolved, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pdf_hash, alert_key) DO UPDATE SET
                     kind = excluded.kind,
                     severity = excluded.severity,
                     unit = excluded.unit,
                     label_unit = excluded.label_unit,
+                    location = excluded.location,
                     carrier = excluded.carrier,
                     tracking = excluded.tracking,
                     last4 = excluded.last4,
@@ -605,6 +607,7 @@ class AuditDatabase:
                     alert.severity,
                     normalize_unit(alert.unit),
                     normalize_unit(alert.label_unit),
+                    normalize_location(alert.location),
                     normalize_carrier(alert.carrier),
                     normalize_tracking(alert.tracking),
                     self._last4(alert.last4, alert.tracking),
@@ -619,7 +622,7 @@ class AuditDatabase:
         if include_resolved:
             rows = self.conn.execute(
                 """
-                SELECT alert_key, kind, severity, unit, label_unit, carrier, tracking, last4,
+                SELECT alert_key, kind, severity, unit, label_unit, location, carrier, tracking, last4,
                        message, item_ids, resolved, created_at
                 FROM scanner_alerts WHERE pdf_hash = ?
                 ORDER BY resolved, created_at DESC, id DESC
@@ -629,7 +632,7 @@ class AuditDatabase:
         else:
             rows = self.conn.execute(
                 """
-                SELECT alert_key, kind, severity, unit, label_unit, carrier, tracking, last4,
+                SELECT alert_key, kind, severity, unit, label_unit, location, carrier, tracking, last4,
                        message, item_ids, resolved, created_at
                 FROM scanner_alerts WHERE pdf_hash = ? AND resolved = 0
                 ORDER BY created_at DESC, id DESC
@@ -643,6 +646,7 @@ class AuditDatabase:
                 severity=severity,
                 unit=unit,
                 label_unit=label_unit,
+                location=location,
                 carrier=carrier,
                 tracking=tracking,
                 last4=last4,
@@ -657,6 +661,7 @@ class AuditDatabase:
                 severity,
                 unit,
                 label_unit,
+                location,
                 carrier,
                 tracking,
                 last4,

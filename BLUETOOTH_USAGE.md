@@ -7,7 +7,7 @@ the cable is not needed for audits. Android 12 or newer and a Bluetooth-capable 
 
 ## Install once
 
-The locally built installer is `dist/PackageAuditScanner-0.12.0.apk`. Keep the matching Mac version (0.12.0).
+The locally built installer is `dist/PackageAuditScanner-0.13.0.apk`. Keep the matching Mac version (0.13.0).
 
 1. On the Samsung, enable Developer options by tapping **Settings → About phone → Software information →
    Build number** seven times, then enable **USB debugging** in Developer options.
@@ -20,7 +20,7 @@ The locally built installer is `dist/PackageAuditScanner-0.12.0.apk`. Keep the m
    ```bash
    cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
    adb devices -l
-   adb install -r dist/PackageAuditScanner-0.12.0.apk
+   adb install -r dist/PackageAuditScanner-0.13.0.apk
    ```
 
    The device must say `device`, not `unauthorized`. A blank list means USB debugging or the data connection
@@ -58,8 +58,9 @@ prevents idle Mac sleep for the life of the app. Leave the Mac lid open and keep
 5. In normal mode, keep the tracking barcode and destination unit number visible in the camera preview. Keep
    barcode white margins visible, tap the preview to focus, or use **Flashlight**. The app briefly collects stable
    carrier barcodes and reads unit text entirely on the phone before asking the Mac to check them.
-6. If tracking and unit agree, the phone says so and offers confirmation. If no reliable unit is read, compare
-   the audit unit shown on the phone with the physical label and choose manual confirmation, rescan, or review.
+6. If tracking and unit agree, the phone shows the audit unit and package location, then offers confirmation.
+   If no reliable unit is read, compare the audit unit shown on the phone with the physical label and choose
+   manual confirmation, rescan, or review.
    Tracking-only mode always uses this manual comparison. Only confirmation marks the row checked.
 7. Scanning resumes automatically after the saved acknowledgment. Move to the next box; the same visible
    barcode is suppressed until it leaves the frame or a different barcode is detected.
@@ -69,9 +70,12 @@ prevents idle Mac sleep for the life of the app. Leave the Mac lid open and keep
    If a clear scanned unit conflicts with the audit, the app automatically warns you and creates a Mac alert
    containing both values; do not deliver by the audit unit. Final review pre-fills the label unit and generates
    the full logged-unit/correct-unit reason automatically.
-9. Review every Mac alert, converting genuine issues to Package Errors with a standard reason template or
+9. To open an alert yourself, tap **Scan package into alert**, scan its label, then choose the package's physical
+   location. The phone sends the tracking, any read label unit, and location to a new Mac alert without marking
+   the audit row present.
+10. Review every Mac alert, converting genuine issues to Package Errors with a standard reason template or
    dismissing verified non-errors. Export remains locked while alerts are open.
-10. Confirm every physical storage area in the final export checklist, export, then click **Stop Bluetooth
+11. Confirm every physical storage area in the final export checklist, export, then click **Stop Bluetooth
     Scanner**. A new audit or scanner restart needs a fresh pairing QR.
 
 Tracking always requires an exact full barcode match; last-four-only matching is never used. Normal mode adds
@@ -139,7 +143,7 @@ uv run python scripts/build_android.py
 ```
 
 The Gradle wrapper downloads Gradle 8.11.1 on first use. The script runs release unit tests and Android lint,
-builds a signed APK, and copies it to `dist/PackageAuditScanner-0.12.0.apk`. `.signing/` contains the private
+builds a signed APK, and copies it to `dist/PackageAuditScanner-0.13.0.apk`. `.signing/` contains the private
 local update key and password: back it up securely, never commit/share it, and retain it for future updates.
 This is a privately installed build, not a Play Store release or an independently audited security product.
 

@@ -49,7 +49,8 @@ saved automatically in `~/.package_audit/audit_state.sqlite3`.
    The old search text is selected automatically, so immediately type the next unit. If only one result is
    visible, press **Enter** directly from the search box. A mouse click also returns focus to search.
 3. Add exceptions under **Package Errors** and **Double Logged** when needed. Edits save automatically.
-4. Use **Export Audit TXT**, **Export CSV**, or **Export Highlighted PDF** and choose an output location.
+4. Use **Export Audit TXT**, **Export CSV**, or **Export Highlighted PDF** and choose an output location. The
+   suggested filename is `YYYY_MMDD_package_audit` with the corresponding extension.
 
 The original PDF is never overwritten by a highlighted-PDF export.
 
@@ -62,7 +63,9 @@ The original PDF is never overwritten by a highlighted-PDF export.
    or the macOS Bluetooth pairing screen; pairing happens inside Package Audit.
 5. Once connected, leave **Mode: Tracking + unit** selected, tap **Scan packages**, and keep the tracking barcode
    plus destination unit visible. A compatible numeric unit (`2803` for audit unit `2803S`) is verified before
-   confirmation. A clear conflict becomes an alert; an unreadable unit can be manually confirmed or rescanned.
+   confirmation. The matched package location is shown on the phone. A clear conflict becomes an alert; an
+   unreadable unit can be manually confirmed or rescanned. Use **Scan package into alert** to capture tracking,
+   unit, and a selected physical location directly into a Mac review alert.
    Use **Mode: Tracking only** for labels without useful unit text and compare the displayed audit unit manually.
 6. Keep the Mac awake and nearby. To prevent idle sleep for this run, launch with
    `caffeinate -i uv run package-audit`. Keep the phone scanner in the foreground.

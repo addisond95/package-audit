@@ -9,9 +9,9 @@ no browser, Wi-Fi, hotspot, internet connection, Cloudflare tunnel, account, or 
 an audit.
 
 > Status: versions 0.10 and 0.11 completed successful real package-room audits on a Mac and Samsung Galaxy S24
-> Ultra. Version 0.12 adds on-device unit reading, flexible tracking-only/manual fallback, unit-based scoring,
-> and custom note triggers. It passes the automated, Android release-build, packaged-Mac, and disposable S24/Mac
-> Bluetooth unit-OCR acceptance checks. Real shipping-label verification during an audit is still required. It is not
+> Ultra. Version 0.13 adds package-location results, scan-to-alert creation, and consistent dated export names
+> on top of the v0.12 unit-reading workflow. The release passes automated, Android release-build, and packaged-Mac
+> checks and is installed on the test S24 Ultra. Real shipping-label verification during an audit is still required. It is not
 > yet a notarized macOS release, Play Store release, or formally independently security-audited product.
 
 ## What it does today
@@ -54,6 +54,9 @@ an audit.
   useful destination unit and asks the operator to compare the returned audit unit manually.
 - A clear unit conflict automatically creates a Mac alert carrying both the audit unit and label unit and warns
   the phone operator to investigate. It does not mark the row present.
+- Shows the package's audit location (such as BIN, BB, CAGE, or FCR) with a successful tracking result.
+- Provides **Scan package into alert**: scan tracking and unit, choose the physical location, and save a manual
+  alert on the Mac without retyping those package details.
 - Returns to live scanning automatically after a saved confirmation. Flashlight, tap-to-focus, wrong-barcode
   rescan, and undo are available on the phone.
 - Preserves reliable unknown tracking numbers in Alerts and detects duplicate tracking values for review.
@@ -125,7 +128,9 @@ Then:
 6. If both values match, confirm the result. If the unit cannot be read, compare the displayed audit unit and
    confirm manually, rescan, or flag it. Never confirm a clear mismatch.
 7. Wait for **Saved on Mac**. The phone resumes scanning for the next package automatically.
-8. Click **Stop Bluetooth Scanner** on the Mac when finished, then export any needed report.
+8. For a package that needs an operator-created exception, tap **Scan package into alert**, scan its label, and
+   choose its physical location. The Mac retains it in Alerts for final review.
+9. Click **Stop Bluetooth Scanner** on the Mac when finished, then export any needed report.
 
 Keep the Mac awake, the phone app in the foreground, and both devices within tested Bluetooth range. VPN,
 public Wi-Fi, mobile data, and hotspot configuration do not affect Bluetooth scanning.
@@ -135,7 +140,7 @@ public Wi-Fi, mobile data, and hotspot configuration do not affect Bluetooth sca
 The signed installer produced by this workspace is:
 
 ```text
-dist/PackageAuditScanner-0.12.0.apk
+dist/PackageAuditScanner-0.13.0.apk
 ```
 
 Enable **USB debugging** in Android Developer options, connect an unlocked phone with a USB data cable, approve
@@ -144,7 +149,7 @@ the Mac's debugging key, and run:
 ```bash
 cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
 adb devices -l
-adb install -r dist/PackageAuditScanner-0.12.0.apk
+adb install -r dist/PackageAuditScanner-0.13.0.apk
 ```
 
 The device must display `device` in the first command. Choose **Transferring files / Android Auto** for the USB
@@ -198,6 +203,9 @@ Available exports:
 - Audit report (`.txt`)
 - Spreadsheet-safe raw audit data (`.csv`)
 - Highlighted copy of the source PDF
+
+The default filename for every export is `YYYY_MMDD_package_audit` with the appropriate `.txt`, `.csv`, or
+`.pdf` extension (for example, `2026_0912_package_audit.txt`).
 
 Before any export, all open scanner alerts must be reviewed. The final area checklist then requires confirmation
 of every configured storage area; completed checks are saved with that audit so interrupted reviews can resume.
@@ -308,6 +316,8 @@ package-audit/
 
 ## Recommended next steps
 
+For the product roadmap and working field-test checklist, see [ROADMAP.md](ROADMAP.md).
+
 The best next work should be driven by observations from real audits. In priority order:
 
 1. **Operational polish:** measure the v0.12 barcode-plus-unit scanner against the real label mix, capturing
@@ -325,6 +335,9 @@ The best next work should be driven by observations from real audits. In priorit
 
 ## Version history
 
+- **v0.13.0** — audit location shown on phone scan results, phone-created alerts populated from scanned
+  tracking/unit plus an operator-selected location, location-aware desktop alert review, and standardized
+  `YYYY_MMDD_package_audit` export filenames.
 - **v0.12.0** — bundled on-device destination-unit OCR, exact tracking plus abstracted numeric-unit verification,
   automatic audit-unit/label-unit mismatch alerts, manual unreadable-unit confirmation, tracking-only mode,
   privacy-safe scan outcome profiling, unit-based audit scoring, custom percentage-triggered audit notes, and

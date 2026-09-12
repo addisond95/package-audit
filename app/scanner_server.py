@@ -18,7 +18,8 @@ from urllib.parse import urlparse
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, session, url_for
 from werkzeug.serving import BaseWSGIServer, WSGIRequestHandler, make_server
 
-from app.models import AuditEntry
+from app.constants import LOCATIONS
+from app.models import AuditEntry, normalize_location
 from app.scanner_matching import PackageMatcher, ScanDecision, ScanObservation
 from app.scanner_tunnel import CloudflareQuickTunnel, TunnelStartupError
 from app.scanner_vision import (
@@ -59,6 +60,7 @@ class ScannerAction:
     observation: ScanObservation
     decision: ScanDecision
     item_id: str = ""
+    location: str = ""
 
 
 @dataclass
@@ -261,6 +263,57 @@ class ScannerCoordinator:
 
             return self._response(stored)
 
+    def create_manual_alert(
+        self,
+        observation: ScanObservation,
+        location: str,
+        *,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Create an operator-requested alert from decoded phone label data."""
+        with self._lock:
+            self._require_generation(expected_generation)
+            if not self._pdf_hash or not self._matcher.records:
+                raise RuntimeError("Open an audit PDF on the desktop before scanning.")
+            normalized_location = normalize_location(location)
+            if normalized_location == "CG":
+                normalized_location = "CAGE"
+            if normalized_location not in {normalize_location(value) for value in LOCATIONS}:
+                raise ValueError("Choose a package location from the phone list.")
+
+            matched = self._matcher.decide(observation)
+            if matched.status == "poor_scan" or not matched.tracking:
+                raise ValueError("One clear tracking barcode is required. Isolate it and scan again.")
+
+            scan_id = secrets.token_hex(8)
+            decision = ScanDecision(
+                status="manual_alert",
+                confidence=matched.confidence,
+                message="Package alert saved for end-of-audit review.",
+                candidates=matched.candidates,
+                tracking=matched.tracking,
+                unit=matched.unit,
+                location=normalized_location,
+                carrier=matched.carrier,
+                scan_key=observation.scan_key,
+                related_item_ids=matched.related_item_ids,
+                scanned_units=observation.unit_candidates,
+                unit_status=("operator_alert" if observation.unit_scan_attempted else "not_attempted"),
+            )
+            stored = _StoredScan(scan_id, observation, decision, time.monotonic(), flagged=True)
+            self._scans[scan_id] = stored
+            self._actions.put(
+                ScannerAction(
+                    scan_id,
+                    "manual_alert",
+                    observation,
+                    decision,
+                    location=normalized_location,
+                )
+            )
+            self._prune_scans()
+            return self._response(stored)
+
     def _require_generation(self, expected_generation: int | None) -> None:
         if expected_generation is not None and expected_generation != self._generation:
             raise ScannerSessionExpiredError(
@@ -341,6 +394,7 @@ class ScannerCoordinator:
                 candidates=stored.decision.candidates,
                 tracking=tracking,
                 unit=selected.unit,
+                location=selected.location,
                 carrier=stored.decision.carrier,
                 scan_key=stored.decision.scan_key,
                 related_item_ids=(item_id,),
@@ -488,8 +542,8 @@ function setConnection(online,message,authEnded=false){desktopOnline=online;cons
 async function api(path,options={},timeoutMs=requestTimeoutMs){options.headers={...(options.headers||{}),'X-CSRF-Token':csrf};const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),timeoutMs);let response;try{response=await fetch(path,{...options,signal:controller.signal})}catch(_error){const error=new Error('Desktop did not respond. Check the phone connection, keep the scanner running, and try again.');error.network=true;throw error}finally{clearTimeout(timeout)}const data=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(data.error||`Request failed (${response.status})`);error.status=response.status;throw error}return data}
 function actionButton(label,action,cls=''){return `<button type="button" class="${cls}" data-action="${action}">${esc(label)}</button>`}
 function bindResultActions(){resultBox.querySelectorAll('[data-candidate]').forEach(button=>button.addEventListener('click',()=>confirmMatch(Number(button.dataset.candidate))));resultBox.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>runAction(button.dataset.action)));updateControls()}
-function render(data){current=data;if(liveActive)livePaused=true;const allowed=['confirm','matched','already_matched','not_found','flagged','duplicate','unit_mismatch','unit_not_read','poor_scan','rejected','undo_queued'];const status=allowed.includes(data.status)?data.status:'poor_scan';const tracking=String(data.tracking||'');resultBox.className=`result show ${status}`;let html=`<h2>${esc(data.message||'Scan complete')}</h2>`;if(status==='confirm'){html+=`<div class="unit-number">${esc(data.unit)}</div><div class="meta"><span>Tracking …${esc(tracking.slice(-4))}</span></div><div class="actions">${actionButton(`Confirm unit ${data.unit}`, 'confirm','confirm-action')}${actionButton('Flag unit mismatch','flag-review')}${actionButton('Wrong barcode — rescan','reject','danger')}</div>`}
-else{html+='<div class="meta">';if(data.tracking)html+=`<span>Tracking …${esc(data.tracking.slice(-4))}</span>`;if(data.unit)html+=`<span>Unit ${esc(data.unit)}</span>`;html+='</div>';if(data.repeated)html+='<p>This barcode was already processed; no duplicate action was added.</p>';
+function render(data){current=data;if(liveActive)livePaused=true;const allowed=['confirm','matched','already_matched','not_found','flagged','duplicate','unit_mismatch','unit_not_read','poor_scan','rejected','undo_queued'];const status=allowed.includes(data.status)?data.status:'poor_scan';const tracking=String(data.tracking||'');resultBox.className=`result show ${status}`;let html=`<h2>${esc(data.message||'Scan complete')}</h2>`;if(status==='confirm'){html+=`<div class="unit-number">${esc(data.unit)}</div><div class="meta">${data.location?`<span>Location ${esc(data.location)}</span>`:''}<span>Tracking …${esc(tracking.slice(-4))}</span></div><div class="actions">${actionButton(`Confirm unit ${data.unit}`, 'confirm','confirm-action')}${actionButton('Flag unit mismatch','flag-review')}${actionButton('Wrong barcode — rescan','reject','danger')}</div>`}
+else{html+='<div class="meta">';if(data.tracking)html+=`<span>Tracking …${esc(data.tracking.slice(-4))}</span>`;if(data.unit)html+=`<span>Unit ${esc(data.unit)}</span>`;if(data.location)html+=`<span>Location ${esc(data.location)}</span>`;html+='</div>';if(data.repeated)html+='<p>This barcode was already processed; no duplicate action was added.</p>';
 if(status==='already_matched'){html+=`<div class="actions">${actionButton('Scan next package','camera')}${actionButton('Wrong — retake','reject','danger')}</div>`}
 else if(status==='not_found'){html+=`<div class="actions">${actionButton('Flag for end review','not-found','confirm-action')}${actionButton('Rescan label','reject','danger')}</div>`}
 else if(status==='unit_not_read'){html+=`<div class="actions">${actionButton('Flag for end review','flag-review','confirm-action')}${actionButton('Rescan address area','reject','danger')}</div>`}

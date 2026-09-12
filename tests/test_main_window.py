@@ -51,6 +51,12 @@ def _entry(item_id: str, unit: str, resident: str) -> AuditEntry:
     )
 
 
+def test_audit_export_basename_uses_year_monthday_format():
+    assert main_window.audit_export_basename(main_window.datetime(2026, 9, 12, 20, 30)) == (
+        "2026_0912_package_audit"
+    )
+
+
 def test_bluetooth_confirmation_is_saved_before_ack_and_reconnect_is_idempotent(window):
     import json
 
@@ -88,6 +94,64 @@ def test_bluetooth_confirmation_is_saved_before_ack_and_reconnect_is_idempotent(
     undone = send(client, {"id": "undo", "op": "undo", "scan_id": scan["result"]["scan_id"]})
     assert undone["result"]["saved"] is True
     assert window.db.load_state(window.pdf_hash) == {"one": False}
+
+
+def test_bluetooth_manual_alert_is_saved_with_location_before_phone_ack(window):
+    import json
+
+    from app.bluetooth_protocol import ScannerBluetoothSession, SecureChannel, compact, decode64, encode64
+
+    tracking = "1Z999AA10123456784"
+    window.entries = [
+        AuditEntry("one", 0, "1701S", "Private Resident", f"UPS - #1 - BIN - {tracking}", "", "")
+    ]
+    window.scanner_coordinator.configure(window.pdf_hash, window.entries)
+    session = ScannerBluetoothSession(
+        window.scanner_coordinator, window._process_scanner_actions, window._bluetooth_save_verified
+    )
+    client_nonce = b"m" * 32
+    welcome = json.loads(session.receive(compact({"hello": encode64(client_nonce)})))
+    client = SecureChannel(
+        session.secret,
+        client_nonce,
+        decode64(welcome["welcome"]),
+        server=False,
+    )
+
+    def send(request):
+        return client.open(json.loads(session.receive(compact(client.seal(request)))))
+
+    acknowledged = send(
+        {
+            "id": "manual-alert",
+            "op": "manual_alert",
+            "barcodes": [tracking],
+            "formats": ["CODE_128"],
+            "units": ["1701"],
+            "unit_confidences": [0.9],
+            "location": "CAGE",
+        }
+    )
+
+    assert acknowledged["result"]["saved"] is True
+    alert = window.db.load_scanner_alerts(window.pdf_hash, include_resolved=False)[0]
+    assert (alert.kind, alert.unit, alert.label_unit, alert.location, alert.tracking) == (
+        "manual",
+        "1701S",
+        "1701",
+        "CAGE",
+        tracking,
+    )
+
+    undone = send(
+        {
+            "id": "undo-manual-alert",
+            "op": "undo",
+            "scan_id": acknowledged["result"]["scan_id"],
+        }
+    )
+    assert undone["result"]["saved"] is True
+    assert window.db.load_scanner_alerts(window.pdf_hash) == []
 
 
 def test_sorted_row_toggle_updates_the_displayed_entry_and_database(window):
@@ -492,6 +556,48 @@ def test_scanner_unknown_tracking_preserves_scanned_label_unit_in_review_alert(w
     window._undo_scanner_action("scan-unit-only")
 
     assert window.db.load_package_errors("ui-test") == []
+
+
+def test_phone_manual_alert_preserves_scanned_values_and_selected_location(window):
+    tracking = "1Z999AA10123456784"
+    window.entries = [AuditEntry("one", 0, "1701S", "Resident", f"UPS - #1 - BIN - {tracking}", "", "")]
+    observation = ScanObservation(
+        barcodes=(tracking,),
+        unit_candidates=("1701",),
+        unit_confidences=(0.9,),
+        unit_scan_attempted=True,
+        carrier="UPS",
+    )
+    decision = ScanDecision(
+        status="manual_alert",
+        confidence=1.0,
+        message="Manual alert",
+        tracking=tracking,
+        unit="1701S",
+        location="BB",
+        scanned_units=("1701",),
+        carrier="UPS",
+        scan_key=observation.scan_key,
+        related_item_ids=("one",),
+    )
+
+    window._apply_scanner_action(
+        ScannerAction("manual-one", "manual_alert", observation, decision, location="BB")
+    )
+
+    alert = window.db.load_scanner_alerts("ui-test", include_resolved=False)[0]
+    assert (alert.kind, alert.unit, alert.label_unit, alert.location, alert.tracking) == (
+        "manual",
+        "1701S",
+        "1701",
+        "BB",
+        tracking,
+    )
+    dialog = main_window.AlertResolutionDialog(alert, window._error_templates(), window)
+    assert dialog.location.currentText() == "BB"
+
+    window._undo_scanner_action("manual-one")
+    assert window.db.load_scanner_alerts("ui-test") == []
 
 
 def test_scanner_unit_mismatch_becomes_review_alert_and_templated_error(window):

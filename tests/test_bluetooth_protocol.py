@@ -33,7 +33,8 @@ def send(session, client, request):
 def session():
     coordinator = ScannerCoordinator()
     coordinator.configure(
-        "audit", [AuditEntry("one", 0, "1701S", "Private Name", "UPS - #1 - 1Z999AA10123456784", "", "")]
+        "audit",
+        [AuditEntry("one", 0, "1701S", "Private Name", "UPS - #1 - BIN - 1Z999AA10123456784", "", "")],
     )
     return ScannerBluetoothSession(coordinator, lambda: None, lambda _result: True)
 
@@ -69,6 +70,7 @@ def test_confirmation_retry_after_disconnect_does_not_repeat_mutation(session):
         {"id": "scan", "op": "scan", "barcodes": ["1Z999AA10123456784"], "formats": ["CODE_128"]},
     )["result"]
     assert scan["status"] == "confirm" and scan["unit"] == "1701S"
+    assert scan["location"] == "BIN"
     assert b"Private Name" not in compact(scan)
     assert all(action.kind != "match" for action in session.coordinator.drain_actions())
     request = {"id": "confirm", "op": "confirm", "scan_id": scan["scan_id"], "item_id": "one"}
@@ -191,6 +193,51 @@ def test_phone_can_flag_a_known_tracking_unit_mismatch(session):
     assert flagged["unit"] == "1701S"
     assert flagged["saved"] is True
     assert session.coordinator.drain_actions()[0].kind == "flag_review"
+
+
+def test_phone_can_create_a_manual_alert_from_a_scanned_label_and_location(session):
+    client = handshake(session)
+    result = send(
+        session,
+        client,
+        {
+            "id": "manual-alert",
+            "op": "manual_alert",
+            "barcodes": ["1Z999AA10123456784"],
+            "formats": ["CODE_128"],
+            "units": ["1701"],
+            "unit_confidences": [0.9],
+            "location": "BB",
+        },
+    )["result"]
+
+    assert result["status"] == "flagged"
+    assert result["tracking"] == "1Z999AA10123456784"
+    assert result["unit"] == "1701S"
+    assert result["scanned_unit"] == "1701"
+    assert result["location"] == "BB"
+    action = session.coordinator.drain_actions()[0]
+    assert (action.kind, action.location) == ("manual_alert", "BB")
+
+
+def test_manual_alert_rejects_an_unknown_location(session):
+    client = handshake(session)
+    response = send(
+        session,
+        client,
+        {
+            "id": "bad-location",
+            "op": "manual_alert",
+            "barcodes": ["1Z999AA10123456784"],
+            "formats": ["CODE_128"],
+            "units": [],
+            "unit_confidences": [],
+            "location": "LOBBY DESK",
+        },
+    )
+
+    assert response["ok"] is False
+    assert session.coordinator.drain_actions() == []
 
 
 def test_failed_persistence_is_never_acknowledged_as_saved(session):

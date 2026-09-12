@@ -130,6 +130,7 @@ class ScannerAlert:
     severity: str
     unit: str = ""
     label_unit: str = ""
+    location: str = ""
     carrier: str = "PKG"
     tracking: str = ""
     last4: str = MISSING_LAST4

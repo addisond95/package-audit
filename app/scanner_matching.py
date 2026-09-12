@@ -148,6 +148,7 @@ class ScanObservation:
 class AuditMatchRecord:
     item_id: str
     unit: str
+    location: str
     trackings: tuple[str, ...]
     last4: str
     audited: bool
@@ -157,6 +158,7 @@ class AuditMatchRecord:
         return cls(
             item_id=entry.item_id,
             unit=normalize_unit(entry.unit),
+            location=entry.report_location,
             trackings=entry_tracking_values(entry.package),
             last4=entry.last4,
             audited=entry.audited,
@@ -167,6 +169,7 @@ class AuditMatchRecord:
 class MatchCandidate:
     item_id: str
     unit: str
+    location: str
     last4: str
     tracking: str
     confidence: float = 1.0
@@ -176,6 +179,7 @@ class MatchCandidate:
         return {
             "item_id": self.item_id,
             "unit": self.unit,
+            "location": self.location,
             "last4": self.last4,
             "tracking": self.tracking,
             "confidence": self.confidence,
@@ -191,6 +195,7 @@ class ScanDecision:
     candidates: tuple[MatchCandidate, ...] = ()
     tracking: str = ""
     unit: str = ""
+    location: str = ""
     carrier: str = "PKG"
     scan_key: str = ""
     related_item_ids: tuple[str, ...] = ()
@@ -205,6 +210,7 @@ class ScanDecision:
             "tracking": self.tracking,
             "last4": self.tracking[-4:] if self.tracking else MISSING_LAST4,
             "unit": self.unit,
+            "location": self.location,
             "carrier": self.carrier,
             "scan_key": self.scan_key,
             "related_item_ids": list(self.related_item_ids),
@@ -240,6 +246,7 @@ class PackageMatcher:
         return MatchCandidate(
             item_id=record.item_id,
             unit=record.unit,
+            location=record.location,
             last4=tracking[-4:] if tracking else record.last4,
             tracking=tracking,
             audited=record.audited,
@@ -270,6 +277,7 @@ class PackageMatcher:
                 message=f"This tracking number is logged more than once: {', '.join(units)}.",
                 candidates=candidates,
                 tracking=duplicate_tracking,
+                location=" / ".join(sorted({record.location for record in records})),
                 carrier=observation.carrier,
                 scan_key=observation.scan_key,
                 related_item_ids=tuple(record.item_id for record in records),
@@ -314,6 +322,7 @@ class PackageMatcher:
                         candidates=(candidate,),
                         tracking=tracking,
                         unit=record.unit,
+                        location=record.location,
                         carrier=observation.carrier,
                         scan_key=observation.scan_key,
                         related_item_ids=(record.item_id,),
@@ -331,6 +340,7 @@ class PackageMatcher:
                         candidates=(candidate,),
                         tracking=tracking,
                         unit=record.unit,
+                        location=record.location,
                         carrier=observation.carrier,
                         scan_key=observation.scan_key,
                         related_item_ids=(record.item_id,),
@@ -355,6 +365,7 @@ class PackageMatcher:
                 candidates=(candidate,),
                 tracking=tracking,
                 unit=record.unit,
+                location=record.location,
                 carrier=observation.carrier,
                 scan_key=observation.scan_key,
                 related_item_ids=(record.item_id,),

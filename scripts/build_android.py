@@ -119,7 +119,7 @@ def build() -> None:
     )
     built_apk = ROOT / "android/app/build/outputs/apk/release/app-release.apk"
     verify_permissions(built_apk, environment)
-    destination = ROOT / "dist/PackageAuditScanner-0.12.0.apk"
+    destination = ROOT / "dist/PackageAuditScanner-0.13.0.apk"
     destination.parent.mkdir(exist_ok=True)
     shutil.copy2(built_apk, destination)
     print(f"APK ready: {destination}")

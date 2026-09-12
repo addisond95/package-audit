@@ -20,6 +20,9 @@ import org.json.*;
 
 public final class MainActivity extends ComponentActivity implements BleClient.Listener {
     private static final int GREEN = Color.rgb(23, 107, 77);
+    private static final String[] PACKAGE_LOCATIONS = {
+        "SHELF", "BIN", "BB", "CAGE", "UG", "ALPHA", "FCR", "PERISHABLES", "ODDITIES"
+    };
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService cameraExecutor = Executors.newSingleThreadExecutor();
     private BleClient ble;
@@ -29,9 +32,9 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
     private PreviewView preview;
     private FrameLayout cameraFrame;
     private TextView connection, instructions, unit, details, progress;
-    private Button pair, reconnect, scan, scanMode, confirm, flagError, next, undo, torch;
+    private Button pair, reconnect, scan, scanMode, createAlert, confirm, flagError, next, undo, torch;
     private boolean pairingMode, scanning, cameraRunning, startingCamera, foreground, requestInFlight;
-    private boolean torchOn, trackingOnly;
+    private boolean torchOn, trackingOnly, manualAlertMode;
     private final Map<String, Integer> codeHits = new HashMap<>();
     private final Set<String> previousCodes = new HashSet<>();
     private final Set<String> blockedCodes = new HashSet<>();
@@ -115,10 +118,13 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         undo.setVisibility(View.GONE);
         scan = button(layout, "Scan packages", () -> {
             if (scanning) { scanning = false; analyzer.enabled = false; scan.setText("Resume scanning"); }
-            else nextPackage();
+            else { manualAlertMode = false; nextPackage(); }
         });
         scan.setEnabled(false);
         scanMode = button(layout, "Mode: Tracking + unit", this::toggleScanMode);
+        createAlert = button(layout, "Scan package into alert", this::startManualAlertScan);
+        createAlert.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(181, 88, 22)));
+        createAlert.setTextColor(Color.WHITE);
         torch = button(layout, "Flashlight", () -> {
             if (camera != null && camera.getCameraInfo().hasFlashUnit()) {
                 torchOn = !torchOn; camera.getCameraControl().enableTorch(torchOn);
@@ -153,7 +159,8 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
     }
 
     private void preparePairing() {
-        ble.forget(); pairingMode = true; scanning = false; current = lastSaved = null;
+        ble.forget(); pairingMode = true; scanning = false; manualAlertMode = false;
+        current = lastSaved = null;
         requestInFlight = false; resultEpoch++; blockedCodes.clear(); resetDetection();
         unit.setText(""); details.setText(""); confirm.setVisibility(View.GONE);
         flagError.setVisibility(View.GONE); next.setVisibility(View.GONE);
@@ -275,6 +282,13 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         if (stable.keySet().stream().anyMatch(value -> value.startsWith("packageaudit:"))) {
             instructions.setText("That is a pairing QR. Point at a package tracking barcode."); return;
         }
+        if (manualAlertMode) {
+            scanning = false;
+            analyzer.enabled = false;
+            showManualAlertLocation(new TreeMap<>(stable), new TreeMap<>(pendingUnits));
+            updateControls();
+            return;
+        }
         try {
             JSONObject request = BleClient.request("scan");
             request.put("barcodes", new JSONArray(stable.keySet()));
@@ -325,6 +339,7 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         scan.setEnabled(enabled && (current == null || !"confirm".equals(current.optString("status"))));
         confirm.setEnabled(enabled); flagError.setEnabled(enabled); next.setEnabled(enabled); undo.setEnabled(enabled);
         scanMode.setEnabled(!requestInFlight);
+        createAlert.setEnabled(enabled && current == null);
         if (!pairingMode) scan.setText(scanning ? "Pause scanning" : "Scan packages");
     }
 
@@ -338,6 +353,7 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         }
         requestInFlight = false;
         resultEpoch++;
+        if ("manual_alert".equals(operation)) manualAlertMode = false;
         if (!response.optBoolean("ok")) {
             details.setText(response.optString("error", "Mac could not complete this action."));
             instructions.setText("Check the Mac, or scan the package again.");
@@ -352,8 +368,10 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
         unit.setText(loggedUnit.isEmpty() ? "" : "Unit " + loggedUnit);
         String tracking = current.optString("tracking");
         String scannedUnit = current.optString("scanned_unit");
+        String packageLocation = current.optString("location");
         details.setText(current.optString("message")
             + (scannedUnit.isEmpty() ? "" : "\nLabel unit: " + scannedUnit)
+            + (packageLocation.isEmpty() ? "" : "\nLocation: " + packageLocation)
             + (tracking.isEmpty() ? "" : "\nTracking …" + tracking.substring(Math.max(0, tracking.length()-4))));
         boolean needsConfirm = "confirm".equals(status);
         boolean unmatched = "not_found".equals(status);
@@ -412,6 +430,61 @@ public final class MainActivity extends ComponentActivity implements BleClient.L
                 && !"unit_not_read".equals(status)) return;
         try { sendAction("not_found".equals(status) ? "not_found" : "flag_review", current, null); }
         catch (Exception error) { details.setText("Could not flag this scan. Try again."); }
+    }
+
+    private void startManualAlertScan() {
+        if (!ble.ready() || requestInFlight || current != null) return;
+        scanning = false;
+        analyzer.enabled = false;
+        manualAlertMode = true;
+        nextPackage();
+        instructions.setText("Scan the package label. After tracking and unit are read, choose its location.");
+    }
+
+    private void showManualAlertLocation(TreeMap<String, String> codes, TreeMap<String, Float> units) {
+        String foundUnit = units.isEmpty() ? "Unit not read" : "Label unit: " + units.firstKey();
+        new AlertDialog.Builder(this)
+            .setTitle("Choose package location")
+            .setMessage(foundUnit + "\nThe alert will be saved on the Mac for final review.")
+            .setItems(PACKAGE_LOCATIONS, (dialog, which) -> sendManualAlert(codes, units, PACKAGE_LOCATIONS[which]))
+            .setNegativeButton("Cancel", (dialog, which) -> {
+                manualAlertMode = false;
+                resetDetection();
+                instructions.setText("Alert cancelled. Tap Scan packages or Scan package into alert.");
+                updateControls();
+            })
+            .setOnCancelListener(dialog -> {
+                manualAlertMode = false;
+                resetDetection();
+                instructions.setText("Alert cancelled. Tap Scan packages or Scan package into alert.");
+                updateControls();
+            })
+            .show();
+    }
+
+    private void sendManualAlert(TreeMap<String, String> codes, TreeMap<String, Float> units, String location) {
+        try {
+            JSONObject request = BleClient.request("manual_alert")
+                .put("barcodes", new JSONArray(codes.keySet()))
+                .put("formats", new JSONArray(codes.values()))
+                .put("units", new JSONArray(units.keySet()))
+                .put("unit_confidences", new JSONArray(units.values()))
+                .put("location", location);
+            if (ble.send(request)) {
+                requestInFlight = true;
+                instructions.setText("Waiting for Mac to save the alert…");
+                resultEpoch++;
+                updateControls();
+            } else {
+                manualAlertMode = false;
+                instructions.setText("Could not send the alert. Check the connection and try again.");
+                updateControls();
+            }
+        } catch (Exception error) {
+            manualAlertMode = false;
+            details.setText("Could not create this alert. Scan the package again.");
+            updateControls();
+        }
     }
 
     private void sendAction(String op, JSONObject target, String item) throws Exception {
