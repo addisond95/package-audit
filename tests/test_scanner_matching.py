@@ -14,6 +14,28 @@ from app.scanner_matching import (
 )
 
 
+def test_overlong_barcode_cannot_match_a_truncated_audit_tracking():
+    tracking = "1Z" + "1" * 38
+    matcher = PackageMatcher([_entry("one", "1701S", "Test", tracking)])
+    assert extract_tracking_values(tracking + "999999", trusted=True) == ()
+    assert matcher.decide(ScanObservation(barcodes=(tracking + "999999",))).status == "poor_scan"
+
+
+@pytest.mark.parametrize("package", ["AMZ -#2209361938", "AMZ-#2209361938", "AMZ - #2209361938"])
+def test_tight_event_marker_never_becomes_tracking(package):
+    assert entry_tracking_values(package) == ()
+    assert entry_tracking_values(package + " - TBA331958945193") == ("TBA331958945193",)
+
+
+def test_scan_identity_includes_unit_confidence_and_barcode_format():
+    weak = ScanObservation(barcodes=("123456789012",), unit_candidates=("1702",), unit_confidences=(0.5,))
+    strong = ScanObservation(barcodes=("123456789012",), unit_candidates=("1702",), unit_confidences=(1.0,))
+    retail = ScanObservation(barcodes=("123456789012",), barcode_formats=("UPC_A",))
+    shipping = ScanObservation(barcodes=("123456789012",), barcode_formats=("CODE_128",))
+    assert weak.scan_key != strong.scan_key
+    assert retail.scan_key != shipping.scan_key
+
+
 def _entry(
     item_id: str,
     unit: str,
@@ -59,6 +81,7 @@ def test_unique_exact_barcode_requires_unit_confirmation():
     assert decision.candidates[0].location == "BIN"
     assert "resident" not in decision.candidates[0].to_dict()
     assert decision.confidence == 1.0
+    assert decision.carrier == "UPS"
 
 
 def test_native_scan_requires_tracking_and_compatible_unit():

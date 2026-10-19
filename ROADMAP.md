@@ -10,7 +10,7 @@ This is the working roadmap from the current offline audit tool to a product-rea
 - Never train a model from unreviewed scans. Training labels must be reviewed, versioned, and traceable.
 - Minimize resident data. The normal audit must remain offline and work without uploading labels.
 
-## Current baseline: v0.13
+## Current baseline: v0.17
 
 - [x] Offline Bluetooth connection between the Android scanner and Mac audit app.
 - [x] Fast on-device barcode + QR scanning, with OCR fallback and multiple barcode candidates.
@@ -22,10 +22,21 @@ This is the working roadmap from the current offline audit tool to a product-rea
 - [x] Package location shown with phone results and retained in scanner alerts.
 - [x] Operator-created alerts from a phone label scan plus physical-location selection.
 - [x] Consistent `YYYY_MMDD_package_audit` export filenames.
+- [x] Timestamped shift notes saved per audit and included in the text report.
+- [x] Recoverable same-label rescanning, bounded Bluetooth label payloads, and multi-code alert creation.
+- [x] Conservative carrier-format classification plus locally learned, privacy-safe carrier structure counts.
+- [x] Explicit opt-in Android label-example capture and offline `.pasample` export.
+- [x] Encrypted local training-data store and authenticated loopback API with review states and deletion.
+- [x] Visual region annotation, capture-group-safe splitting, and immutable dataset version manifests.
+- [x] Conventional multi-task vision training, held-out evaluation, ONNX parity checks, and model cards.
+- [x] Release thresholds, Ed25519 signing, offline Android inference, and release-ID rollback tooling.
 
 ### Important limitation of the current learning loop
 
-The existing feedback loop records aggregate scan outcomes and verified unit aliases. It does **not** retain label images or retrain barcode/OCR/layout models. It will not, on its own, learn damaged labels or carrier-specific visual layouts. The later training-data and model phases below are what enable that.
+The routine feedback loop records aggregate scan outcomes, verified unit aliases, and confirmed carrier-format
+structures without retaining tracking values. Label images enter the separate encrypted dataset through
+the phone's explicit **Confirm + training** action or diagnostic export. The system does **not** retrain barcode/OCR/layout models from unreviewed
+samples; model training still requires approved annotations and a sufficiently representative dataset.
 
 ## Phase 0 — Field validation of the current scanner
 
@@ -76,14 +87,15 @@ Authenticated API -> encrypted object storage (label image/crop)
 Human review -> approved, versioned training dataset -> model training
 ```
 
-- [ ] Use an API; the phone must never connect directly to a database or cloud storage bucket.
-- [ ] Upload only explicitly selected diagnostic samples or staff-approved corrections—not every routine scan.
+- [x] Use an API; clients never connect directly to the review database or encrypted image store.
+- [x] Collect only explicitly selected diagnostic samples—not every routine scan.
 - [ ] Crop to the relevant label area on-device when possible and redact/minimize unrelated information before upload.
-- [ ] Require authenticated users/devices, property/tenant isolation, encryption in transit and at rest, audit logs, rate limits, and deletion requests.
+- [x] Provide bearer authentication, encrypted local image/metadata storage, review states, and deletion.
+- [ ] Add property/tenant isolation, TLS, durable audit logs, rate limits, and privacy-request workflows before any cloud deployment.
 - [ ] Define retention: short raw-image retention, longer de-identified annotations only when justified, and a documented purge process.
-- [ ] Add a review tool and label schema: carrier, barcode region, tracking-text region, destination-address region, unit region, optional last-name region, image quality, damage type, orientation, and verified outcome.
-- [ ] Require a human reviewer to approve each training label; preserve source, reviewer, timestamp, consent/status, and dataset version.
-- [ ] Keep a deliberately held-out test set that is never used for training.
+- [x] Add a review tool and label schema: carrier, barcode region, tracking-text region, destination-address region, unit region, optional last-name region, image quality, damage type, orientation, and verified outcome.
+- [x] Require explicit consent and human annotations before a sample can be marked approved; preserve source, reviewer, timestamps, status, and schema version.
+- [x] Keep a deliberately held-out test set that is never used for training.
 
 **Acceptance gate:** sample collection is secure, opt-in, reviewable, deletable, and produces consistently annotated data.
 
@@ -98,23 +110,23 @@ Build a conventional supervised computer-vision pipeline, not an agentic system:
 5. Confidence thresholds choose: confirm candidate, ask for confirmation/rescan, or create an alert.
 
 - [ ] Benchmark the current scanner before adding ML, per carrier and label condition.
-- [ ] Train an image-quality/damage classifier for blur, glare, skew, wrinkle, occlusion, low contrast, and torn labels.
+- [x] Implement training for blur, glare, skew, wrinkle, occlusion, low contrast, and torn-label classes; real-data training remains pending.
 - [ ] Add safe preprocessing such as perspective correction, crop selection, rotation, and contrast improvement.
 - [ ] Never use generative reconstruction to invent unreadable barcode digits or tracking text. An unclear label must remain unclear and require a rescan/manual review.
-- [ ] Evaluate carrier/layout models against the held-out test set and real pilot audits.
-- [ ] Package the approved model for offline Android use. Model updates must be versioned, signed, and reversible.
+- [x] Evaluate candidates on validation data and reserve fresh held-out test images for a final release decision; real pilot-audit evaluation remains pending.
+- [x] Package approved models for offline Android use with versioned, signed, reversible releases.
 
 **Acceptance gate:** compared with the v0.12 baseline, the model materially improves first-pass reads and/or reduces false alerts without increasing false package confirmations.
 
 ## Phase 5 — Controlled training, release, and further testing
 
-- [ ] Split data by property/date/label source so near-duplicate labels do not leak between training and test sets.
+- [x] Enforce capture-group splits so near-duplicate labels do not leak between training and test sets.
 - [ ] Track precision, recall, false-confirm rate, false-alert rate, unit/address/name mismatch accuracy, and scan latency overall and by carrier/label condition.
-- [ ] Establish release thresholds before training; false confirmations should be treated as the highest-risk failure.
-- [ ] Validate every candidate model against the fixed held-out test set and a small real-world pilot before release.
+- [x] Establish initial release thresholds before training; false confirmations remain the highest-risk failure.
+- [ ] Select candidates using validation data, perform one final evaluation on fresh held-out test images, and complete a small real-world pilot before release.
 - [ ] Roll out to a small pilot group first, collect only approved diagnostic samples, then expand after review.
-- [ ] Support rollback to the last approved scanner/model version from the Mac app and phone app.
-- [ ] Maintain a model card for each release: training-data version, known limits, metrics, supported carriers/layouts, privacy review, and rollback version.
+- [x] Support rollback by rebuilding the scanner with an older verified approved release ID.
+- [x] Generate a model card for every release with dataset version, limits, metrics, and safety boundary.
 
 **Acceptance gate:** a model release has demonstrated a measurable improvement in live use, meets predefined safety thresholds, and can be rolled back immediately.
 

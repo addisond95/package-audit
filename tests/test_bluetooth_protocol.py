@@ -1,5 +1,6 @@
 """Transport-independent Bluetooth authentication, replay, and audit-save guarantees."""
 
+import hashlib
 import json
 import secrets
 
@@ -7,6 +8,8 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from app.bluetooth_protocol import (
+    MAX_TRAINING_CHUNK_BYTES,
+    MAX_TRAINING_IMAGE_BYTES,
     PROTOCOL,
     ScannerBluetoothSession,
     SecureChannel,
@@ -27,6 +30,29 @@ def handshake(session, secret=None):
 
 def send(session, client, request):
     return client.open(json.loads(session.receive(compact(client.seal(request)))))
+
+
+def test_reconnect_handshake_does_not_require_a_radio_disconnect_callback(session):
+    client = handshake(session)
+    request = {"id": "status-before", "op": "status"}
+    send(session, client, request)
+    assert session.authenticated
+    nonce = secrets.token_bytes(32)
+    welcome = json.loads(session.receive(compact({"hello": encode64(nonce)})))
+    assert not session.authenticated
+    fresh = SecureChannel(session.secret, nonce, decode64(welcome["welcome"]), server=False)
+    result = send(session, fresh, {"id": "status-after", "op": "status"})
+    assert result["ok"] and session.authenticated
+
+
+def test_fresh_handshake_invalidates_previous_directional_keys(session):
+    old = handshake(session)
+    old_packet = compact(old.seal({"id": "old-status", "op": "status"}))
+    session.receive(compact({"hello": encode64(secrets.token_bytes(32))}))
+    from cryptography.exceptions import InvalidTag
+
+    with pytest.raises(InvalidTag):
+        session.receive(old_packet)
 
 
 @pytest.fixture
@@ -174,6 +200,155 @@ def test_phone_can_flag_an_unmatched_tracking_for_desktop_review(session):
     assert session.coordinator.drain_actions()[0].kind == "flag_error"
 
 
+def test_verified_phone_model_carrier_is_advisory_for_ambiguous_tracking(session):
+    client = handshake(session)
+    result = send(
+        session,
+        client,
+        {
+            "id": "model-carrier",
+            "op": "scan",
+            "barcodes": ["123456789012"],
+            "formats": ["CODE_128"],
+            "model_carrier": "FEDEX",
+            "model_carrier_confidence": 0.91,
+        },
+    )["result"]
+
+    assert result["status"] == "not_found"
+    assert result["carrier"] == "FEDEX"
+
+
+def test_low_confidence_phone_model_carrier_is_ignored(session):
+    client = handshake(session)
+    result = send(
+        session,
+        client,
+        {
+            "id": "weak-model-carrier",
+            "op": "scan",
+            "barcodes": ["123456789012"],
+            "formats": ["CODE_128"],
+            "model_carrier": "FEDEX",
+            "model_carrier_confidence": 0.5,
+        },
+    )["result"]
+
+    assert result["status"] == "not_found"
+    assert result["carrier"] == "PKG"
+
+
+def test_confirmed_label_upload_is_chunked_integrity_checked_and_saved(session):
+    saved = []
+    session.save_training_sample = lambda image, metadata: (
+        saved.append((image, metadata)) or {"sample_id": "local-sample"}
+    )
+    client = handshake(session)
+    image = b"local-jpeg-data" * 900
+    upload_id = "upload-one"
+    metadata = {"outcome": "correct", "carrier": "UPS", "app_version": "0.17.0"}
+
+    ready = send(
+        session,
+        client,
+        {
+            "id": "begin",
+            "op": "training_begin",
+            "upload_id": upload_id,
+            "size": len(image),
+            "sha256": hashlib.sha256(image).hexdigest(),
+            "metadata": metadata,
+        },
+    )["result"]
+    assert ready["offset"] == 0
+
+    offset = 0
+    for index in range(0, len(image), MAX_TRAINING_CHUNK_BYTES):
+        chunk = image[index : index + MAX_TRAINING_CHUNK_BYTES]
+        received = send(
+            session,
+            client,
+            {
+                "id": f"chunk-{index}",
+                "op": "training_chunk",
+                "upload_id": upload_id,
+                "offset": offset,
+                "data": encode64(chunk),
+            },
+        )["result"]
+        offset += len(chunk)
+        assert received["offset"] == offset
+
+    finished = send(
+        session,
+        client,
+        {"id": "finish", "op": "training_finish", "upload_id": upload_id},
+    )["result"]
+    assert finished["status"] == "training_saved"
+    assert finished["sample_id"] == "local-sample"
+    assert saved == [(image, {**metadata, "consent": True, "source": "android_bluetooth_confirm"})]
+
+
+def test_training_upload_rejects_oversize_out_of_order_and_bad_digest(session):
+    session.save_training_sample = lambda _image, _metadata: {"sample_id": "never"}
+    client = handshake(session)
+    too_large = send(
+        session,
+        client,
+        {
+            "id": "large",
+            "op": "training_begin",
+            "upload_id": "large",
+            "size": MAX_TRAINING_IMAGE_BYTES + 1,
+            "sha256": "0" * 64,
+            "metadata": {"outcome": "correct"},
+        },
+    )
+    assert too_large["ok"] is False
+
+    begin = {
+        "id": "begin-valid",
+        "op": "training_begin",
+        "upload_id": "bad-digest",
+        "size": 4,
+        "sha256": "0" * 64,
+        "metadata": {"outcome": "correct"},
+    }
+    assert send(session, client, begin)["ok"] is True
+    out_of_order = send(
+        session,
+        client,
+        {
+            "id": "wrong-offset",
+            "op": "training_chunk",
+            "upload_id": "bad-digest",
+            "offset": 1,
+            "data": encode64(b"data"),
+        },
+    )
+    assert out_of_order["ok"] is False
+    assert (
+        send(
+            session,
+            client,
+            {
+                "id": "right-offset",
+                "op": "training_chunk",
+                "upload_id": "bad-digest",
+                "offset": 0,
+                "data": encode64(b"data"),
+            },
+        )["ok"]
+        is True
+    )
+    bad_finish = send(
+        session,
+        client,
+        {"id": "bad-finish", "op": "training_finish", "upload_id": "bad-digest"},
+    )
+    assert bad_finish["ok"] is False
+
+
 def test_phone_can_flag_a_known_tracking_unit_mismatch(session):
     client = handshake(session)
     scan = send(
@@ -238,6 +413,61 @@ def test_manual_alert_rejects_an_unknown_location(session):
 
     assert response["ok"] is False
     assert session.coordinator.drain_actions() == []
+
+
+def test_manual_alert_scan_offers_multiple_tracking_codes_then_saves_selected(session):
+    client = handshake(session)
+    prepared = send(
+        session,
+        client,
+        {
+            "id": "prepare-alert",
+            "op": "prepare_alert",
+            "barcodes": ["1Z000ZZ00000000001", "9400111899223856928499"],
+            "formats": ["CODE_128", "CODE_128"],
+            "units": ["3005"],
+            "unit_confidences": [0.8],
+        },
+    )["result"]
+
+    assert prepared["status"] == "alert_ready"
+    assert prepared["tracking_options"] == ["1Z000ZZ00000000001", "9400111899223856928499"]
+    assert session.coordinator.drain_actions() == []
+
+    saved = send(
+        session,
+        client,
+        {
+            "id": "save-alert",
+            "op": "save_manual_alert",
+            "scan_id": prepared["scan_id"],
+            "tracking": "9400111899223856928499",
+            "location": "SHELF",
+        },
+    )["result"]
+
+    assert saved["status"] == "flagged"
+    assert saved["tracking"] == "9400111899223856928499"
+    assert saved["location"] == "SHELF"
+    assert session.coordinator.drain_actions()[0].kind == "manual_alert"
+
+
+def test_aggregate_barcode_payload_is_bounded_without_expiring_session(session):
+    client = handshake(session)
+    response = send(
+        session,
+        client,
+        {
+            "id": "large-label",
+            "op": "scan",
+            "barcodes": ["A" * 600 + str(index) for index in range(8)],
+            "formats": ["QR_CODE"] * 8,
+        },
+    )
+
+    assert response["ok"] is False
+    follow_up = send(session, client, {"id": "still-connected", "op": "status"})
+    assert follow_up["ok"] is True
 
 
 def test_failed_persistence_is_never_acknowledged_as_saved(session):

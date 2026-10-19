@@ -81,9 +81,17 @@ def parse_buildinglink_pdf(pdf_path: Path) -> list[AuditEntry]:
     entries: list[AuditEntry] = []
 
     with fitz.open(str(pdf_path)) as doc:
+        located_lines: list[tuple[int, str]] = []
         for page_index, page in enumerate(doc):
-            lines = clean_lines(page.get_text("text"))
-            _parse_page(lines, page_index, entries)
+            located_lines.extend((page_index, line) for line in clean_lines(page.get_text("text")))
+        lines = [line for _page, line in located_lines]
+        starts = [index for index in range(len(lines)) if _is_unit_line(lines, index)]
+        blocks_by_page: dict[int, list[str]] = {}
+        for position, start in enumerate(starts):
+            end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+            blocks_by_page.setdefault(located_lines[start][0], []).extend(lines[start:end])
+        for page_index, page_lines in blocks_by_page.items():
+            _parse_page(page_lines, page_index, entries)
 
     return entries
 

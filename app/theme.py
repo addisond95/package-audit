@@ -31,7 +31,7 @@ def build_stylesheet() -> str:
     QWidget {{
         background: {BG};
         color: {TEXT};
-        font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+        font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial;
         font-size: 13px;
     }}
     QMainWindow, QDialog {{ background: {BG}; }}
@@ -73,12 +73,12 @@ def build_stylesheet() -> str:
     QPushButton[variant="danger"]:hover {{ background: {DANGER_SOFT}; border-color: {DANGER}; }}
 
     /* Inputs ------------------------------------------------------------ */
-    QLineEdit, QTextEdit, QComboBox {{
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{
         background: {SURFACE}; border: 1px solid {BORDER_STRONG};
         border-radius: 8px; padding: 6px 10px;
         selection-background-color: {ACCENT}; selection-color: #ffffff;
     }}
-    QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
+    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{
         background: {SURFACE}; border: 1px solid {BORDER_STRONG};

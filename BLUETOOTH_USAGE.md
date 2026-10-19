@@ -7,7 +7,7 @@ the cable is not needed for audits. Android 12 or newer and a Bluetooth-capable 
 
 ## Install once
 
-The locally built installer is `dist/PackageAuditScanner-0.13.0.apk`. Keep the matching Mac version (0.13.0).
+The locally built installer is `dist/PackageAuditScanner-0.17.0.apk`. Keep the matching Mac version (0.17.0).
 
 1. On the Samsung, enable Developer options by tapping **Settings → About phone → Software information →
    Build number** seven times, then enable **USB debugging** in Developer options.
@@ -20,7 +20,7 @@ The locally built installer is `dist/PackageAuditScanner-0.13.0.apk`. Keep the m
    ```bash
    cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
    adb devices -l
-   adb install -r dist/PackageAuditScanner-0.13.0.apk
+   adb install -r dist/PackageAuditScanner-0.17.0.apk
    ```
 
    The device must say `device`, not `unauthorized`. A blank list means USB debugging or the data connection
@@ -134,7 +134,7 @@ Do not treat successful compilation or a Mac **Ready to pair** message as eviden
 ## Build the Android installer from source
 
 Install JDK 17 and the Android SDK (Android Studio can provide both the SDK and Platform-Tools). Set
-`JAVA_HOME` to JDK 17 and `ANDROID_HOME` to your Android SDK directory. Install Android platform 35 and
+`JAVA_HOME` to JDK 17 and `ANDROID_HOME` to your Android SDK directory. Install Android platform 36 and
 Build-Tools 35.0.0 and accept SDK licenses through the SDK manager. Then:
 
 ```bash
@@ -143,7 +143,7 @@ uv run python scripts/build_android.py
 ```
 
 The Gradle wrapper downloads Gradle 8.11.1 on first use. The script runs release unit tests and Android lint,
-builds a signed APK, and copies it to `dist/PackageAuditScanner-0.13.0.apk`. `.signing/` contains the private
+builds a signed APK, and copies it to `dist/PackageAuditScanner-0.17.0.apk`. `.signing/` contains the private
 local update key and password: back it up securely, never commit/share it, and retain it for future updates.
 This is a privately installed build, not a Play Store release or an independently audited security product.
 

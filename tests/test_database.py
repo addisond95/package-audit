@@ -127,6 +127,7 @@ def test_clear_all_for_pdf_removes_everything(db):
     db.record_scanner_feedback("hash-a", "scan-key", "accepted")
     db.record_scanner_feedback("hash-b", "other-key", "accepted")
     db.replace_area_checks("hash-a", {"SHELF"})
+    db.add_shift_note("hash-a", "Loading dock door was blocked")
 
     db.clear_all_for_pdf("hash-a")
 
@@ -134,10 +135,26 @@ def test_clear_all_for_pdf_removes_everything(db):
     assert db.load_package_errors("hash-a") == []
     assert db.load_double_logged("hash-a") == []
     assert db.load_area_checks("hash-a") == set()
+    assert db.load_shift_notes("hash-a") == []
     remaining_feedback_hashes = {
         row[0] for row in db.conn.execute("SELECT pdf_hash FROM scanner_feedback").fetchall()
     }
     assert remaining_feedback_hashes == {"hash-b"}
+
+
+def test_shift_notes_are_timestamped_ordered_and_isolated(db):
+    first = db.add_shift_note("hash-a", "First package cart arrived")
+    second = db.add_shift_note("hash-a", "Carrier returned with one correction")
+    db.add_shift_note("hash-b", "Different audit")
+
+    notes = db.load_shift_notes("hash-a")
+    assert [note.text for note in notes] == [
+        "First package cart arrived",
+        "Carrier returned with one correction",
+    ]
+    assert all(note.created_at for note in notes)
+    db.delete_shift_note("hash-a", first.note_id)
+    assert db.load_shift_notes("hash-a") == [second]
 
 
 def test_legacy_database_migrates_tracking_columns(tmp_path):
@@ -260,29 +277,12 @@ def test_scanner_event_feedback_and_model_round_trip(db):
     assert loaded[0].details == {"reasons": ["tracking", "unit"]}
 
     db.record_scanner_feedback("hash-a", "key", "accepted", "one", "one", {"unit": 1})
-    assert db.scanner_feedback_count() == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM scanner_feedback").fetchone()[0] == 1
     feedback_json = db.conn.execute("SELECT features FROM scanner_feedback").fetchone()[0]
     assert feedback_json == '{"unit": 1}'
     model = {"bias": -3.5, "weights": {"unit": 2.0}, "examples": 1}
     db.save_scanner_model(model)
     assert db.load_scanner_model() == model
-
-
-def test_scanner_units_query_is_not_limited_to_recent_events(db):
-    tracking = "1Z000ZZ00000000001"
-    for index in range(105):
-        db.save_scanner_event(
-            "hash-a",
-            ScannerEvent(
-                scan_id=f"scan-{index:03d}",
-                status="not_found",
-                confidence=0.95,
-                unit="9901S" if index == 0 else "",
-                tracking=tracking if index == 0 else f"TRACKING{index:010d}",
-            ),
-        )
-
-    assert db.scanner_units_for_tracking("hash-a", tracking) == {"9901S"}
 
 
 def test_malformed_scanner_json_falls_back_safely(db):

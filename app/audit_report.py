@@ -17,6 +17,7 @@ from app.models import (
     AuditNoteRule,
     DoubleLoggedPackage,
     PackageError,
+    ShiftNote,
     normalize_carrier,
     normalize_location,
     normalize_tracking,
@@ -46,6 +47,7 @@ def make_audit_report(
     double_logged: list[DoubleLoggedPackage],
     source_pdf_name: str = "",
     audit_note_rules: list[AuditNoteRule] | None = None,
+    shift_notes: list[ShiftNote] | None = None,
 ) -> str:
     canonical_entries, _ = canonical_audit_entries(entries)
     unchecked = sorted(
@@ -180,6 +182,20 @@ def make_audit_report(
     lines.append("")
     lines.extend(_format_rows(audit_notes))
 
+    # Shift notes remain separate from formula-driven audit findings so the
+    # operator's contemporaneous record is easy to locate and quote.
+    lines.append("")
+    lines.append(_section(5, "SHIFT NOTES"))
+    lines.append("")
+    note_rows: list[list[str]] = []
+    for note in shift_notes or []:
+        try:
+            timestamp = datetime.fromisoformat(note.created_at).astimezone().strftime("%m/%d/%Y %I:%M:%S %p")
+        except (TypeError, ValueError):
+            timestamp = note.created_at.replace("T", " ")[:19]
+        note_rows.append([timestamp, note.text])
+    lines.extend(_format_rows(note_rows))
+
     lines.append("")
     return "\n".join(lines)
 
@@ -191,6 +207,7 @@ def write_audit_report(
     double_logged: list[DoubleLoggedPackage],
     source_pdf_name: str = "",
     audit_note_rules: list[AuditNoteRule] | None = None,
+    shift_notes: list[ShiftNote] | None = None,
 ) -> None:
     report = make_audit_report(
         entries=entries,
@@ -198,6 +215,7 @@ def write_audit_report(
         double_logged=double_logged,
         source_pdf_name=source_pdf_name,
         audit_note_rules=audit_note_rules,
+        shift_notes=shift_notes,
     )
     with atomic_output_path(output_path) as temporary_path:
         temporary_path.write_text(report, encoding="utf-8")

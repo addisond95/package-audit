@@ -8,21 +8,14 @@ from dataclasses import dataclass
 
 from app.constants import AUDIT_NOTE_METRICS, AUDIT_NOTE_OPERATORS
 from app.models import AuditEntry, AuditNoteRule, DoubleLoggedPackage, PackageError, normalize_unit
-from app.scanner_matching import entry_tracking_values
+from app.scanner_matching import entry_tracking_values, tracking_components
 
 
 def canonical_audit_entries(entries: list[AuditEntry]) -> tuple[list[AuditEntry], set[str]]:
     """Return one physical audit row per overlapping full tracking identity."""
-    canonical: list[AuditEntry] = []
-    claimed_trackings: set[str] = set()
-    suppressed: set[str] = set()
-    for entry in entries:
-        trackings = set(entry_tracking_values(entry.package))
-        if trackings and trackings & claimed_trackings:
-            suppressed.add(entry.item_id)
-            continue
-        canonical.append(entry)
-        claimed_trackings.update(trackings)
+    components = tracking_components([entry_tracking_values(entry.package) for entry in entries])
+    canonical = [entries[indices[0]] for indices in components]
+    suppressed = {entries[index].item_id for indices in components for index in indices[1:]}
     return canonical, suppressed
 
 
@@ -48,22 +41,6 @@ class AuditAssessment:
     unclosed_packages: int
     error_records: int
     duplicate_records: int
-
-    @property
-    def total(self) -> int:
-        return self.total_units
-
-    @property
-    def not_closed(self) -> int:
-        return self.not_closed_units
-
-    @property
-    def errors(self) -> int:
-        return self.error_units
-
-    @property
-    def double_logs(self) -> int:
-        return self.duplicate_units
 
     @property
     def completion_rate(self) -> float:

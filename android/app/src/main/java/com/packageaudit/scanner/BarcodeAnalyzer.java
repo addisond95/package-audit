@@ -29,7 +29,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * local ZXing decoder remains as an independent fallback for difficult labels.
  */
 final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
-    interface Listener { void detected(List<DetectedBarcode> values, List<DetectedUnit> units); }
+    interface Listener {
+        void detected(List<DetectedBarcode> values, List<DetectedUnit> units, LabelModel.Prediction prediction);
+    }
 
     interface ZoomListener { boolean zoom(float ratio); }
 
@@ -38,9 +40,10 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
     private final BarcodeScanner scanner;
     private final TextRecognizer textRecognizer;
     private final AtomicBoolean processing = new AtomicBoolean();
+    private final LabelModel labelModel;
     volatile boolean enabled;
 
-    BarcodeAnalyzer(Executor executor, Listener listener, ZoomListener zoomListener) {
+    BarcodeAnalyzer(Executor executor, Listener listener, ZoomListener zoomListener, LabelModel labelModel) {
         this.executor = executor;
         ZoomSuggestionOptions zoom = new ZoomSuggestionOptions.Builder(zoomListener::zoom)
             .setMaxSupportedZoomRatio(3.0f)
@@ -64,6 +67,7 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
         scanner = BarcodeScanning.getClient(options);
         textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         this.listener = listener;
+        this.labelModel = labelModel;
     }
 
     @Override
@@ -85,9 +89,10 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
                     if (values.isEmpty()) values = fromZxing(image);
                     List<DetectedUnit> units = textTask.isSuccessful()
                         ? fromText(textTask.getResult()) : Collections.emptyList();
-                    listener.detected(values, units);
+                    LabelModel.Prediction prediction = labelModel == null ? null : labelModel.infer(image);
+                    listener.detected(values, units, prediction);
                 } catch (RuntimeException error) {
-                    listener.detected(Collections.emptyList(), Collections.emptyList());
+                    listener.detected(Collections.emptyList(), Collections.emptyList(), null);
                 } finally {
                     processing.set(false);
                     image.close();
@@ -96,7 +101,7 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
         } catch (RuntimeException error) {
             processing.set(false);
             image.close();
-            listener.detected(Collections.emptyList(), Collections.emptyList());
+            listener.detected(Collections.emptyList(), Collections.emptyList(), null);
         }
     }
 
@@ -151,5 +156,8 @@ final class BarcodeAnalyzer implements ImageAnalysis.Analyzer, AutoCloseable {
         }
     }
 
-    @Override public void close() { scanner.close(); textRecognizer.close(); }
+    @Override public void close() {
+        scanner.close(); textRecognizer.close();
+        if (labelModel != null) labelModel.close();
+    }
 }

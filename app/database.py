@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ from app.models import (
     PackageError,
     ScannerAlert,
     ScannerEvent,
+    ShiftNote,
     normalize_carrier,
     normalize_location,
     normalize_tracking,
@@ -39,6 +42,7 @@ class AuditDatabase:
             # Permission bits are not consistently supported on Windows.
             pass
         self.conn = sqlite3.connect(str(db_path))
+        self._transaction_depth = 0
         try:
             os.chmod(self.db_path, 0o600)
         except OSError:
@@ -52,13 +56,25 @@ class AuditDatabase:
     def __exit__(self, *_exc) -> None:
         self.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Compose database operations without prematurely committing inner writes."""
+        savepoint = f"audit_transaction_{self._transaction_depth}"
+        self.conn.execute(f"SAVEPOINT {savepoint}")
+        self._transaction_depth += 1
+        try:
+            yield
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except BaseException:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+        finally:
+            self._transaction_depth -= 1
+
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    @staticmethod
-    def _last4(last4: str, tracking: str) -> str:
-        return resolve_last4(last4, tracking)
 
     @staticmethod
     def _json_object(value: str) -> dict[str, Any]:
@@ -84,7 +100,7 @@ class AuditDatabase:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def create_tables(self) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_state (
@@ -221,6 +237,19 @@ class AuditDatabase:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shift_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pdf_hash TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shift_notes_hash ON shift_notes (pdf_hash, created_at, id)"
+            )
 
     def load_state(self, pdf_hash: str) -> dict[str, bool]:
         rows = self.conn.execute(
@@ -231,7 +260,7 @@ class AuditDatabase:
         return {item_id: bool(audited) for item_id, audited in rows}
 
     def set_state(self, pdf_hash: str, item_id: str, audited: bool) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 INSERT INTO audit_state (pdf_hash, item_id, audited)
@@ -244,7 +273,7 @@ class AuditDatabase:
 
     def set_states(self, pdf_hash: str, states: list[tuple[str, bool]]) -> None:
         """Persist several audit-state changes in one transaction."""
-        with self.conn:
+        with self.transaction():
             self.conn.executemany(
                 """
                 INSERT INTO audit_state (pdf_hash, item_id, audited)
@@ -256,16 +285,16 @@ class AuditDatabase:
             )
 
     def clear_audit_state(self, pdf_hash: str) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM audit_state WHERE pdf_hash = ?", (pdf_hash,))
 
     def clear_manual_rows(self, pdf_hash: str) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM package_errors WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM double_logged WHERE pdf_hash = ?", (pdf_hash,))
 
     def clear_all_for_pdf(self, pdf_hash: str) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM audit_state WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM package_errors WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM double_logged WHERE pdf_hash = ?", (pdf_hash,))
@@ -273,6 +302,35 @@ class AuditDatabase:
             self.conn.execute("DELETE FROM scanner_events WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM scanner_feedback WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.execute("DELETE FROM audit_area_checks WHERE pdf_hash = ?", (pdf_hash,))
+            self.conn.execute("DELETE FROM shift_notes WHERE pdf_hash = ?", (pdf_hash,))
+
+    def add_shift_note(self, pdf_hash: str, text: str) -> ShiftNote:
+        value = text.strip()
+        if not value:
+            raise ValueError("Shift note cannot be empty.")
+        created_at = self._now()
+        with self.transaction():
+            cursor = self.conn.execute(
+                "INSERT INTO shift_notes (pdf_hash, note, created_at) VALUES (?, ?, ?)",
+                (pdf_hash, value, created_at),
+            )
+        return ShiftNote(value, created_at, cursor.lastrowid)
+
+    def load_shift_notes(self, pdf_hash: str) -> list[ShiftNote]:
+        rows = self.conn.execute(
+            "SELECT id, note, created_at FROM shift_notes WHERE pdf_hash = ? ORDER BY created_at, id",
+            (pdf_hash,),
+        ).fetchall()
+        return [
+            ShiftNote(text=note, created_at=created_at, note_id=note_id) for note_id, note, created_at in rows
+        ]
+
+    def delete_shift_note(self, pdf_hash: str, note_id: int) -> None:
+        with self.transaction():
+            self.conn.execute(
+                "DELETE FROM shift_notes WHERE pdf_hash = ? AND id = ?",
+                (pdf_hash, note_id),
+            )
 
     def load_area_checks(self, pdf_hash: str) -> set[str]:
         rows = self.conn.execute(
@@ -282,7 +340,7 @@ class AuditDatabase:
         return {area for (area,) in rows}
 
     def replace_area_checks(self, pdf_hash: str, areas: set[str]) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM audit_area_checks WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.executemany(
                 "INSERT INTO audit_area_checks (pdf_hash, area, checked) VALUES (?, ?, 1)",
@@ -301,7 +359,7 @@ class AuditDatabase:
         value = " ".join(message.split())
         if not value:
             return False
-        with self.conn:
+        with self.transaction():
             cursor = self.conn.execute(
                 "INSERT OR IGNORE INTO error_templates (message, created_at) VALUES (?, ?)",
                 (value, self._now()),
@@ -309,7 +367,7 @@ class AuditDatabase:
         return cursor.rowcount > 0
 
     def delete_error_template(self, message: str) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM error_templates WHERE message = ?", (message.strip(),))
 
     def load_audit_note_rules(self) -> list[AuditNoteRule]:
@@ -331,7 +389,7 @@ class AuditDatabase:
         ]
 
     def replace_audit_note_rules(self, rules: list[AuditNoteRule]) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM audit_note_rules")
             self.conn.executemany(
                 """
@@ -377,7 +435,7 @@ class AuditDatabase:
         ]
 
     def replace_package_errors(self, pdf_hash: str, rows: list[PackageError]) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM package_errors WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.executemany(
                 """
@@ -391,7 +449,7 @@ class AuditDatabase:
                         normalize_location(row.location),
                         normalize_carrier(row.carrier),
                         normalize_tracking(row.tracking),
-                        self._last4(row.last4, row.tracking),
+                        resolve_last4(row.last4, row.tracking),
                         row.note.strip(),
                     )
                     for row in rows
@@ -401,7 +459,7 @@ class AuditDatabase:
     def add_package_error_if_missing(self, pdf_hash: str, row: PackageError) -> bool:
         unit = normalize_unit(row.unit)
         tracking = normalize_tracking(row.tracking)
-        last4 = self._last4(row.last4, tracking)
+        last4 = resolve_last4(row.last4, tracking)
         note = row.note.strip()
         if tracking:
             existing = self.conn.execute(
@@ -418,7 +476,7 @@ class AuditDatabase:
             ).fetchone()
         if existing:
             return False
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 INSERT INTO package_errors (pdf_hash, unit, location, carrier, tracking, last4, note)
@@ -439,7 +497,7 @@ class AuditDatabase:
     def delete_package_error(self, pdf_hash: str, row: PackageError) -> None:
         """Delete one exact automatic row without touching similar manual rows."""
         tracking = normalize_tracking(row.tracking)
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 DELETE FROM package_errors
@@ -452,7 +510,7 @@ class AuditDatabase:
                     normalize_location(row.location),
                     normalize_carrier(row.carrier),
                     tracking,
-                    self._last4(row.last4, tracking),
+                    resolve_last4(row.last4, tracking),
                     row.note.strip(),
                 ),
             )
@@ -480,7 +538,7 @@ class AuditDatabase:
         ]
 
     def replace_double_logged(self, pdf_hash: str, rows: list[DoubleLoggedPackage]) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute("DELETE FROM double_logged WHERE pdf_hash = ?", (pdf_hash,))
             self.conn.executemany(
                 """
@@ -494,7 +552,7 @@ class AuditDatabase:
                         normalize_location(row.location),
                         normalize_carrier(row.carrier),
                         normalize_tracking(row.tracking),
-                        self._last4(row.last4, row.tracking),
+                        resolve_last4(row.last4, row.tracking),
                     )
                     for row in rows
                 ],
@@ -503,7 +561,7 @@ class AuditDatabase:
     def add_double_logged_if_missing(self, pdf_hash: str, row: DoubleLoggedPackage) -> bool:
         unit = normalize_unit(row.unit)
         tracking = normalize_tracking(row.tracking)
-        last4 = self._last4(row.last4, tracking)
+        last4 = resolve_last4(row.last4, tracking)
         existing = self.conn.execute(
             """
             SELECT 1 FROM double_logged
@@ -517,7 +575,7 @@ class AuditDatabase:
         ).fetchone()
         if existing:
             return False
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 INSERT INTO double_logged (pdf_hash, unit, location, carrier, tracking, last4)
@@ -539,7 +597,7 @@ class AuditDatabase:
         tracking = normalize_tracking(row.tracking)
         if not tracking:
             return
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 "DELETE FROM double_logged WHERE pdf_hash = ? AND tracking = ?",
                 (pdf_hash, tracking),
@@ -555,14 +613,14 @@ class AuditDatabase:
                     normalize_location(row.location),
                     normalize_carrier(row.carrier),
                     tracking,
-                    self._last4(row.last4, tracking),
+                    resolve_last4(row.last4, tracking),
                 ),
             )
 
     def delete_double_logged(self, pdf_hash: str, row: DoubleLoggedPackage) -> None:
         """Delete one exact automatic duplicate without removing nearby manual data."""
         tracking = normalize_tracking(row.tracking)
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 DELETE FROM double_logged
@@ -575,12 +633,12 @@ class AuditDatabase:
                     normalize_location(row.location),
                     normalize_carrier(row.carrier),
                     tracking,
-                    self._last4(row.last4, tracking),
+                    resolve_last4(row.last4, tracking),
                 ),
             )
 
     def upsert_scanner_alert(self, pdf_hash: str, alert: ScannerAlert) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 INSERT INTO scanner_alerts (
@@ -610,7 +668,7 @@ class AuditDatabase:
                     normalize_location(alert.location),
                     normalize_carrier(alert.carrier),
                     normalize_tracking(alert.tracking),
-                    self._last4(alert.last4, alert.tracking),
+                    resolve_last4(alert.last4, alert.tracking),
                     alert.message.strip(),
                     json.dumps(list(alert.item_ids)),
                     int(alert.resolved),
@@ -673,21 +731,21 @@ class AuditDatabase:
         ]
 
     def resolve_scanner_alert(self, pdf_hash: str, alert_key: str, resolved: bool = True) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 "UPDATE scanner_alerts SET resolved = ? WHERE pdf_hash = ? AND alert_key = ?",
                 (int(resolved), pdf_hash, alert_key),
             )
 
     def delete_scanner_alert(self, pdf_hash: str, alert_key: str) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 "DELETE FROM scanner_alerts WHERE pdf_hash = ? AND alert_key = ?",
                 (pdf_hash, alert_key),
             )
 
     def save_scanner_event(self, pdf_hash: str, event: ScannerEvent) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 INSERT INTO scanner_events (
@@ -713,7 +771,7 @@ class AuditDatabase:
                     normalize_unit(event.unit),
                     normalize_carrier(event.carrier),
                     normalize_tracking(event.tracking),
-                    self._last4(event.last4, event.tracking),
+                    resolve_last4(event.last4, event.tracking),
                     event.item_id,
                     event.message,
                     json.dumps(event.details or {}, sort_keys=True),
@@ -760,20 +818,6 @@ class AuditDatabase:
             ) in rows
         ]
 
-    def scanner_units_for_tracking(self, pdf_hash: str, tracking: str) -> set[str]:
-        """Return every non-blank unit previously recorded for a tracking value."""
-        normalized = normalize_tracking(tracking)
-        if not normalized:
-            return set()
-        rows = self.conn.execute(
-            """
-            SELECT DISTINCT unit FROM scanner_events
-            WHERE pdf_hash = ? AND tracking = ? AND unit <> ''
-            """,
-            (pdf_hash, normalized),
-        ).fetchall()
-        return {normalize_unit(row[0]) for row in rows}
-
     def record_scanner_feedback(
         self,
         pdf_hash: str,
@@ -783,7 +827,7 @@ class AuditDatabase:
         chosen_item_id: str = "",
         features: dict[str, Any] | None = None,
     ) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 INSERT INTO scanner_feedback (
@@ -802,16 +846,12 @@ class AuditDatabase:
                 ),
             )
 
-    def scanner_feedback_count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) FROM scanner_feedback").fetchone()
-        return int(row[0])
-
     def load_scanner_model(self) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT model_json FROM scanner_model WHERE model_key = 'default'").fetchone()
         return self._json_object(row[0]) if row else None
 
     def save_scanner_model(self, model: dict[str, Any]) -> None:
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 """
                 INSERT INTO scanner_model (model_key, model_json, updated_at)

@@ -100,6 +100,12 @@ def test_regular_open_package_report_fields_include_carrier_location_and_last_fo
     assert entry.open_report_reference == "6784"
 
 
+def test_regular_open_package_location_defaults_to_shelf_when_missing():
+    entry = AuditEntry("package", 0, "2803S", "Resident", "UPS - #1 - 1Z999AA10123456784", "", "")
+
+    assert entry.report_location == "SHELF"
+
+
 def test_unit_sort_key_orders_numerically():
     units = ["3207S", "0205S", "1708S", "1708N"]
     assert sorted(units, key=unit_sort_key) == ["0205S", "1708N", "1708S", "3207S"]

@@ -48,10 +48,13 @@ class UnitResolver:
 
     def matches(self, audit_unit: str, reading: str) -> bool:
         normalized_reading = normalize_unit_reading(reading)
-        if self.aliases.get(normalized_reading) == normalize_unit(audit_unit):
-            return True
         expected = numeric_unit_identity(audit_unit)
-        return bool(expected and expected == numeric_unit_identity(normalized_reading))
+        observed = numeric_unit_identity(normalized_reading)
+        # A learned rendering must never equate different apartment numbers,
+        # including aliases written by older versions of the scanner.
+        if expected and observed:
+            return expected == observed
+        return self.aliases.get(normalized_reading) == normalize_unit(audit_unit)
 
     def verify(
         self,
@@ -72,7 +75,14 @@ class UnitResolver:
             ):
                 candidates.append((reading, confidence))
         scanned = tuple(reading for reading, _confidence in candidates)
-        matched = next((reading for reading, _ in candidates if self.matches(audit_unit, reading)), "")
+        reliable = [(reading, confidence) for reading, confidence in candidates if confidence >= 0.75]
+        strong = [(reading, confidence) for reading, confidence in reliable if confidence >= 0.9]
+        # Explicit address-unit readings take precedence over incidental numbers.
+        if strong and any(not self.matches(audit_unit, reading) for reading, _ in strong):
+            if any(self.matches(audit_unit, reading) for reading, _ in strong):
+                return UnitVerification("unreadable", scanned)
+            return UnitVerification("mismatch", tuple(reading for reading, _ in strong))
+        matched = next((reading for reading, _ in reliable if self.matches(audit_unit, reading)), "")
         if matched:
             return UnitVerification("verified", scanned, matched)
         if any(confidence >= 0.9 for _reading, confidence in candidates):

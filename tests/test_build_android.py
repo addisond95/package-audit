@@ -2,7 +2,12 @@
 
 import pytest
 
-from scripts.build_android import REQUIRED_PERMISSIONS, validate_permissions
+from scripts.build_android import (
+    REQUIRED_PERMISSIONS,
+    resolve_android_home,
+    resolve_java_home,
+    validate_permissions,
+)
 
 
 def test_android_release_permission_policy_accepts_offline_scanner():
@@ -27,3 +32,15 @@ def test_android_release_permission_policy_rejects_data_access(permission):
 def test_android_release_permission_policy_requires_camera_and_bluetooth():
     with pytest.raises(SystemExit, match="missing"):
         validate_permissions(REQUIRED_PERMISSIONS - {"android.permission.CAMERA"})
+
+
+def test_build_tool_resolution_honors_valid_environment_paths(tmp_path):
+    java = tmp_path / "jdk"
+    sdk = tmp_path / "sdk"
+    (java / "bin").mkdir(parents=True)
+    (java / "bin" / "keytool").touch()
+    (sdk / "build-tools").mkdir(parents=True)
+
+    environment = {"JAVA_HOME": str(java), "ANDROID_HOME": str(sdk)}
+    assert resolve_java_home(environment) == java
+    assert resolve_android_home(environment) == sdk

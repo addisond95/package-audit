@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from app.scanner_matching import ScanObservation, normalize_code
+from app.carrier_matching import classify_carrier
+from app.scanner_matching import ScanObservation
 
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
@@ -79,13 +80,12 @@ def _decode_barcodes(image: Image.Image) -> tuple[tuple[str, ...], tuple[str, ..
     return tuple(values), tuple(formats)
 
 
-def _detect_carrier(barcodes: tuple[str, ...]) -> str:
-    normalized = [normalize_code(value) for value in barcodes]
-    if any(value.startswith("1Z") for value in normalized):
-        return "UPS"
-    if any(value.startswith("TBA") for value in normalized):
-        return "AMZ"
-    return "PKG"
+def _detect_carrier(barcodes: tuple[str, ...], barcode_formats: tuple[str, ...] = ()) -> str:
+    observation = ScanObservation(barcodes=barcodes, barcode_formats=barcode_formats)
+    return classify_carrier(
+        observation.barcode_trackings,
+        observation.barcode_tracking_formats,
+    ).carrier
 
 
 def observation_from_barcodes(
@@ -108,7 +108,7 @@ def observation_from_barcodes(
     normalized_values = tuple(values)
     return ScanObservation(
         barcodes=normalized_values,
-        carrier=_detect_carrier(normalized_values),
+        carrier=_detect_carrier(normalized_values, tuple(formats)),
         barcode_formats=tuple(formats),
         unit_candidates=unit_candidates,
         unit_confidences=unit_confidences,

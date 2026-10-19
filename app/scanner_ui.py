@@ -44,7 +44,7 @@ class ScannerPairingDialog(QDialog):
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(12)
 
-        title = QLabel("Remote phone scanner is ready" if server.remote else "Local phone scanner is ready")
+        title = QLabel("Local phone scanner is ready")
         title.setObjectName("scannerTitle")
         layout.addWidget(title)
 
@@ -52,9 +52,7 @@ class ScannerPairingDialog(QDialog):
         status.setObjectName("scannerStatus")
         layout.addWidget(status)
 
-        route_status = QLabel(
-            "Cloudflare HTTPS tunnel: connected" if server.remote else "Direct local Wi-Fi connection"
-        )
+        route_status = QLabel("Direct local Wi-Fi connection")
         route_status.setObjectName("scannerStatus")
         layout.addWidget(route_status)
 
@@ -86,17 +84,8 @@ class ScannerPairingDialog(QDialog):
         layout.addWidget(url)
 
         privacy = QLabel(
-            (
-                "Remote mode sends decoded tracking values or small live camera crops "
-                "through Cloudflare over HTTPS. Package Audit processes them on this Mac "
-                "and does not save them. "
-                "Stopping the scanner closes this temporary public address."
-            )
-            if server.remote
-            else (
-                "Local mode stays on your trusted Wi-Fi. Package Audit processes "
-                "tracking values and live camera crops on this Mac and does not save them."
-            )
+            "Local mode stays on your trusted Wi-Fi. Package Audit processes "
+            "tracking values and live camera crops on this Mac and does not save them."
         )
         privacy.setWordWrap(True)
         privacy.setObjectName("scannerStatus")
@@ -146,9 +135,6 @@ class ScannerPairingDialog(QDialog):
         self.copy_reset_timer.start(1500)
 
     def _refresh_status(self) -> None:
-        if self.server.remote and not self.server.tunnel_running:
-            self.connection_status.setText("Remote tunnel disconnected — stop and restart the scanner")
-            return
         phone_count = self.server.coordinator.active_phone_count()
         if phone_count:
             noun = "phone" if phone_count == 1 else "phones"

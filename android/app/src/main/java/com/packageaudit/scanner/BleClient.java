@@ -30,6 +30,7 @@ final class BleClient {
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic rx;
     private BluetoothLeScanner scanner;
+    private BluetoothDevice knownDevice;
     private UUID service;
     private byte[] secret, clientNonce;
     private SecureChannel channel;
@@ -58,6 +59,7 @@ final class BleClient {
         if (newSecret.length != 32) throw new Exception("Invalid pairing QR.");
         pause();
         service = newService;
+        knownDevice = null;
         if (secret != null) Arrays.fill(secret, (byte) 0);
         secret = newSecret;
         pending = queued = null;
@@ -84,6 +86,7 @@ final class BleClient {
         if (secret != null) Arrays.fill(secret, (byte) 0);
         secret = null;
         service = null;
+        knownDevice = null;
         pending = queued = null;
         listener.state("Scan the Mac pairing QR", false);
     }
@@ -119,6 +122,15 @@ final class BleClient {
         }
         listener.state("Looking for your Mac…", false);
         try {
+            // A connected peripheral may not immediately advertise again. Reuse
+            // this session's discovered device before falling back to discovery.
+            if (knownDevice != null && attempts < 3) {
+                listener.state("Reconnecting to your Mac…", false);
+                gatt = knownDevice.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE);
+                if (gatt == null) throw new IllegalStateException();
+                main.postDelayed(() -> { if (epoch == connectionEpoch && !connected) fail("Mac not reachable."); }, 15000);
+                return;
+            }
             scanner = adapter.getBluetoothLeScanner();
             if (scanner == null) throw new IllegalStateException();
             scanner.startScan(Collections.singletonList(new ScanFilter.Builder()
@@ -149,7 +161,8 @@ final class BleClient {
                 scanner.stopScan(this);
                 scanner = null;
                 listener.state("Connecting to Mac…", false);
-                gatt = result.getDevice().connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE);
+                knownDevice = result.getDevice();
+                gatt = knownDevice.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE);
                 if (gatt == null) fail("Could not connect.");
             });
         }
@@ -228,8 +241,11 @@ final class BleClient {
     private void writePacket(JSONObject packet) throws Exception {
         byte[] bytes = (packet.toString() + "\n").getBytes(StandardCharsets.UTF_8);
         if (bytes.length > 16384) throw new Exception("Message too large");
-        for (int offset = 0; offset < bytes.length; offset += mtu - 3)
-            writes.add(Arrays.copyOfRange(bytes, offset, Math.min(bytes.length, offset + mtu - 3)));
+        // Android 14+ may negotiate MTU 517 even when we request 247. A GATT
+        // attribute still cannot exceed 512 bytes (517 - 3 would be too large).
+        int payloadSize = Math.min(512, mtu - 3);
+        for (int offset = 0; offset < bytes.length; offset += payloadSize)
+            writes.add(Arrays.copyOfRange(bytes, offset, Math.min(bytes.length, offset + payloadSize)));
         pump();
     }
 

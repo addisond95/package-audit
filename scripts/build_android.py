@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
-import subprocess  # nosec B404 -- fixed build tools, argv lists, shell disabled
+import subprocess  # nosec B404
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +24,36 @@ FORBIDDEN_PERMISSIONS = {
 }
 
 
+def resolve_java_home(environment: dict[str, str]) -> Path:
+    """Find JDK 17 without requiring shell profile configuration."""
+    candidates = [
+        environment.get("JAVA_HOME", ""),
+        "/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+        "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
+        "/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
+    ]
+    for candidate in candidates:
+        path = Path(candidate) if candidate else None
+        if path is not None and (path / "bin" / "keytool").is_file():
+            return path
+    raise SystemExit("Install JDK 17 or set JAVA_HOME to its directory before building.")
+
+
+def resolve_android_home(environment: dict[str, str]) -> Path:
+    """Find the Android SDK used by the reproducible local build."""
+    candidates = [
+        environment.get("ANDROID_HOME", ""),
+        environment.get("ANDROID_SDK_ROOT", ""),
+        str(Path.home() / "Library" / "Android" / "sdk"),
+        "/opt/homebrew/share/android-commandlinetools",
+    ]
+    for candidate in candidates:
+        path = Path(candidate) if candidate else None
+        if path is not None and (path / "build-tools").is_dir():
+            return path
+    raise SystemExit("Install Android SDK Build Tools or set ANDROID_HOME before building.")
+
+
 def validate_permissions(permissions: set[str]) -> None:
     """Validate the final merged permission set, independent of build tooling."""
     forbidden = permissions & FORBIDDEN_PERMISSIONS
@@ -40,7 +70,8 @@ def verify_permissions(apk: Path, environment: dict[str, str]) -> None:
     tools = sorted((Path(android_home) / "build-tools").glob("*/aapt"), reverse=True)
     if not tools:
         raise SystemExit("Android Build Tools must include aapt for APK permission verification.")
-    completed = subprocess.run(  # nosec B603 -- SDK aapt, fixed argv, no shell
+    # The SDK aapt path and argv are constructed locally; no shell is used.
+    completed = subprocess.run(  # nosec B603
         [str(tools[0]), "dump", "permissions", str(apk)],
         env=environment,
         check=True,
@@ -56,12 +87,10 @@ def verify_permissions(apk: Path, environment: dict[str, str]) -> None:
 
 
 def build() -> None:
-    java_home = os.environ.get("JAVA_HOME")
-    if not java_home:
-        raise SystemExit("Set JAVA_HOME to your JDK 17 directory before building.")
-    keytool = Path(java_home) / "bin" / "keytool"
-    if not keytool.is_file():
-        raise SystemExit("JAVA_HOME must contain bin/keytool.")
+    environment = dict(os.environ)
+    java_home = resolve_java_home(environment)
+    android_home = resolve_android_home(environment)
+    keytool = java_home / "bin" / "keytool"
     signing = ROOT / ".signing"
     signing.mkdir(mode=0o700, exist_ok=True)
     signing.chmod(0o700)
@@ -75,11 +104,13 @@ def build() -> None:
         descriptor = os.open(password_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w") as output:
             output.write(secrets.token_hex(32))
-    environment = dict(os.environ)
+    environment["JAVA_HOME"] = str(java_home)
+    environment["ANDROID_HOME"] = str(android_home)
     environment["PACKAGE_AUDIT_KEY_PASSWORD"] = password_file.read_text().strip()
     environment["PACKAGE_AUDIT_KEYSTORE"] = str(keystore)
     if not keystore.exists():
-        subprocess.run(  # nosec B603 -- installed keytool, fixed arguments, no shell
+        # The resolved JDK keytool and all arguments are fixed; no shell is used.
+        subprocess.run(  # nosec B603
             [
                 str(keytool),
                 "-genkeypair",
@@ -105,7 +136,8 @@ def build() -> None:
             check=True,
         )
         keystore.chmod(0o600)
-    subprocess.run(  # nosec B603 -- repository Gradle wrapper, fixed tasks, no shell
+    # Run the repository Gradle wrapper with fixed release tasks and no shell.
+    subprocess.run(  # nosec B603
         [
             str(ROOT / "android/gradlew"),
             "--no-daemon",
@@ -119,7 +151,7 @@ def build() -> None:
     )
     built_apk = ROOT / "android/app/build/outputs/apk/release/app-release.apk"
     verify_permissions(built_apk, environment)
-    destination = ROOT / "dist/PackageAuditScanner-0.13.0.apk"
+    destination = ROOT / "dist/PackageAuditScanner-0.17.0.apk"
     destination.parent.mkdir(exist_ok=True)
     shutil.copy2(built_apk, destination)
     print(f"APK ready: {destination}")

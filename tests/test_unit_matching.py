@@ -35,3 +35,16 @@ def test_weak_nonmatching_number_is_unreadable_not_an_accusation():
 def test_learned_alias_is_an_additional_matching_strategy():
     result = UnitResolver({"PENTHOUSE": "PH1"}).verify("PH1", ("penthouse",), (0.8,))
     assert result.status == "verified"
+
+
+def test_legacy_alias_cannot_override_a_different_apartment_number():
+    assert UnitResolver({"3005": "305S"}).verify("305S", ("3005",), (1.0,)).status == "mismatch"
+
+
+def test_unreliable_match_does_not_verify_a_unit():
+    assert UnitResolver().verify("305S", ("305",), (0.1,)).status == "unreadable"
+
+
+def test_explicit_conflict_takes_priority_over_an_incidental_matching_number():
+    assert UnitResolver().verify("305S", ("305", "3005"), (0.75, 1.0)).status == "mismatch"
+    assert UnitResolver().verify("305S", ("305", "3005"), (1.0, 1.0)).status == "unreadable"

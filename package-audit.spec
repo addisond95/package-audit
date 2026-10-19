@@ -9,7 +9,6 @@ Build a self-contained macOS .app bundle:
 Output lands in dist/Package Audit.app
 """
 
-import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH)  # noqa: F821 — injected by PyInstaller
@@ -82,8 +81,8 @@ app = BUNDLE(  # noqa: F821
     bundle_identifier="com.packageaudit.app",
     info_plist={
         "CFBundleDisplayName": "Package Audit",
-        "CFBundleShortVersionString": "0.13.0",
-        "CFBundleVersion": "0.13.0",
+        "CFBundleShortVersionString": "0.17.0",
+        "CFBundleVersion": "0.17.0",
         "NSHighResolutionCapable": True,
         "NSBluetoothAlwaysUsageDescription": "Connect to your offline Android package scanner over Bluetooth.",
         "NSRequiresAquaSystemAppearance": False,

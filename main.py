@@ -49,7 +49,7 @@ def export_smoke() -> None:
 
         entry.audited = False
         write_audit_report(report_path, [entry], [], [], source_pdf.name)
-        if "1701S | UPS | UNSPECIFIED | 6784" not in report_path.read_text(encoding="utf-8"):
+        if "1701S | UPS | SHELF | 6784" not in report_path.read_text(encoding="utf-8"):
             raise RuntimeError("Audit-report smoke test did not contain the expected package.")
         if spreadsheet_safe_cell("=1+1") != "'=1+1":
             raise RuntimeError("Spreadsheet formula neutralization smoke test failed.")
@@ -132,36 +132,6 @@ def scanner_smoke() -> None:
     print("scanner-smoke-ok")
 
 
-def remote_scanner_smoke() -> None:
-    """Exercise a real temporary Cloudflare route when cloudflared is installed."""
-    from app.models import AuditEntry
-    from app.scanner_server import ScannerCoordinator, ScannerServer
-
-    coordinator = ScannerCoordinator()
-    coordinator.configure(
-        "remote-smoke",
-        [
-            AuditEntry(
-                "one",
-                0,
-                "1701S",
-                "Test Resident",
-                "UPS - #1 - 1Z999AA10123456784",
-                "South",
-                "2026-09-05",
-            )
-        ],
-    )
-    server = ScannerServer(coordinator, remote=True)
-    server.start()
-    try:
-        if not server.running or not server.url.startswith("https://"):
-            raise RuntimeError("Remote scanner HTTPS page was not reachable through Cloudflare.")
-    finally:
-        server.stop()
-    print("remote-scanner-smoke-ok")
-
-
 def ui_smoke() -> None:
     """Construct, show, and cleanly close the real window offscreen."""
     import os
@@ -195,8 +165,6 @@ def ui_smoke() -> None:
 if __name__ == "__main__":
     if "--export-smoke" in sys.argv:
         export_smoke()
-    elif "--remote-scanner-smoke" in sys.argv:
-        remote_scanner_smoke()
     elif "--scanner-smoke" in sys.argv:
         scanner_smoke()
     elif "--ui-smoke" in sys.argv:

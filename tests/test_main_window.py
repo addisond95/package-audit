@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import csv
+import io
 import os
+import sqlite3
 import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QTableWidgetItem
@@ -55,6 +58,142 @@ def test_audit_export_basename_uses_year_monthday_format():
     assert main_window.audit_export_basename(main_window.datetime(2026, 9, 12, 20, 30)) == (
         "2026_0912_package_audit"
     )
+
+
+def test_scanner_save_failure_rolls_back_and_retains_work_for_retry(window, monkeypatch):
+    window.entries = [_entry("one", "1701S", "Test")]
+    window.entries[0].package = "UPS - #1 - 1Z999AA10123456784"
+    window.scanner_coordinator.configure(window.pdf_hash, window.entries)
+    result = window.scanner_coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    window._process_scanner_actions()
+    window.scanner_coordinator.confirm(result["scan_id"], "one")
+    original = window.db.save_scanner_event
+
+    def fail(*_args, **_kwargs):
+        raise sqlite3.OperationalError("simulated disk failure")
+
+    monkeypatch.setattr(window.db, "save_scanner_event", fail)
+    with pytest.raises(sqlite3.OperationalError, match="simulated"):
+        window._process_scanner_actions()
+    assert not window.entries[0].audited
+    assert not window.db.load_state(window.pdf_hash).get("one", False)
+    assert window.db.load_scanner_events(window.pdf_hash)[0].status == "confirm"
+    monkeypatch.setattr(window.db, "save_scanner_event", original)
+    window._process_scanner_actions()
+    assert window.entries[0].audited
+    assert window.db.load_state(window.pdf_hash)["one"]
+    assert window.db.load_scanner_events(window.pdf_hash)[0].status == "matched"
+
+
+def test_manual_toggle_does_not_change_memory_when_save_fails(window, monkeypatch):
+    window.entries = [_entry("one", "1701S", "Test")]
+    window._refresh_table()
+
+    def fail(*_args):
+        raise sqlite3.OperationalError("simulated disk failure")
+
+    monkeypatch.setattr(window.db, "set_state", fail)
+    with pytest.raises(sqlite3.OperationalError):
+        window.on_audit_cell_clicked(0, 0)
+    assert not window.entries[0].audited
+
+
+def test_scanner_preparation_read_failure_retains_queued_actions(window, monkeypatch):
+    window.entries = [_entry("one", "1701S", "Test")]
+    window.scanner_coordinator.configure(window.pdf_hash, window.entries)
+    window.scanner_coordinator.process_observation(ScanObservation())
+    original = window.db.load_scanner_model
+
+    def fail():
+        raise sqlite3.OperationalError("simulated read failure")
+
+    monkeypatch.setattr(window.db, "load_scanner_model", fail)
+    with pytest.raises(sqlite3.OperationalError, match="simulated read"):
+        window._process_scanner_actions()
+    monkeypatch.setattr(window.db, "load_scanner_model", original)
+    window._process_scanner_actions()
+    assert len(window.db.load_scanner_events(window.pdf_hash)) == 1
+
+
+def test_clear_current_audit_refreshes_visible_rows(window, monkeypatch):
+    window.entries = [_entry("one", "1701S", "Test")]
+    window.entries[0].audited = True
+    window._refresh_table()
+    monkeypatch.setattr(window, "_confirm", lambda *_args: True)
+    window.clear_current_audit()
+    assert not window.entries[0].audited
+    assert window.table.item(0, 0).text() == ""
+
+
+def test_scanner_event_does_not_rebuild_manual_tables(window, monkeypatch):
+    window.entries = [_entry("one", "1701S", "Test")]
+    window.scanner_coordinator.configure(window.pdf_hash, window.entries)
+    window.scanner_coordinator.process_observation(ScanObservation())
+    refreshed = []
+    monkeypatch.setattr(window, "_populate_errors_table", lambda _rows: refreshed.append("errors"))
+    monkeypatch.setattr(window, "_populate_double_table", lambda _rows: refreshed.append("duplicates"))
+    window._process_scanner_actions()
+    assert refreshed == []
+
+
+def test_export_rechecks_alerts_created_in_file_picker(window, tmp_path, monkeypatch):
+    window.entries = [_entry("one", "1701S", "Test")]
+    warnings = []
+    destination = tmp_path / "audit.txt"
+
+    def choose(*_args):
+        window.db.upsert_scanner_alert(window.pdf_hash, ScannerAlert("late", "unmatched", "review"))
+        return str(destination), ""
+
+    monkeypatch.setattr(main_window.QFileDialog, "getSaveFileName", choose)
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda *_args: warnings.append(True))
+    window.export_audit_txt()
+    assert warnings
+    assert not destination.exists()
+
+
+def test_shift_note_is_saved_immediately_and_rendered(window):
+    window.shift_note_input.setPlainText("  Delivery truck arrived late.  ")
+
+    window.add_shift_note()
+
+    notes = window.db.load_shift_notes("ui-test")
+    assert len(notes) == 1
+    assert notes[0].text == "Delivery truck arrived late."
+    assert window.shift_note_input.toPlainText() == ""
+    assert window.shift_notes_table.rowCount() == 1
+    assert window.shift_notes_table.item(0, 1).text() == "Delivery truck arrived late."
+
+
+def test_training_example_appears_in_mac_training_tab(window):
+    image = io.BytesIO()
+    Image.new("RGB", (320, 200), "white").save(image, "JPEG")
+    sample = window.training_dataset.add_sample(
+        image.getvalue(),
+        {"consent": True, "outcome": "damaged_label", "carrier": "UPS"},
+    )
+
+    window._refresh_training_samples()
+
+    assert window.training_table.rowCount() == 1
+    assert window.training_table.item(0, 1).text() == "Damaged Label"
+    assert window.training_table.item(0, 5).text() == sample["sample_id"]
+
+
+def test_bluetooth_confirmed_training_example_is_encrypted_and_shown_as_pending(window):
+    image = io.BytesIO()
+    Image.new("RGB", (640, 360), "white").save(image, "JPEG")
+
+    sample = window._save_bluetooth_training_sample(
+        image.getvalue(),
+        {"consent": True, "outcome": "correct", "carrier": "UPS", "source": "phone"},
+    )
+
+    assert sample["status"] == "pending"
+    assert window.training_table.rowCount() == 1
+    assert window.training_table.item(0, 3).text() == "Pending"
+    assert window.training_table.item(0, 5).text() == sample["sample_id"]
+    assert image.getvalue() not in next(window.training_dataset.blobs.glob("*.bin")).read_bytes()
 
 
 def test_bluetooth_confirmation_is_saved_before_ack_and_reconnect_is_idempotent(window):
@@ -894,7 +1033,55 @@ def test_configure_scanner_detects_existing_duplicate_tracking(window):
     assert len(window.db.load_scanner_alerts("ui-test", include_resolved=False)) == 1
 
 
-def test_phone_scanner_starts_and_stops_with_loaded_entries(window):
+@pytest.mark.parametrize("bridge_last", [False, True])
+def test_overlapping_duplicates_keep_desktop_report_and_phone_counts_aligned(window, bridge_last):
+    first = _entry("first", "1701S", "Test")
+    bridge = _entry("bridge", "1701S", "Test")
+    last = _entry("last", "1701S", "Test")
+    first.package = "UPS - #1 - 1Z999AA10123456784"
+    bridge.package = "UPS - #2 - 1Z999AA10123456784 - 9400000000000000000000"
+    last.package = "UPS - #3 - 9400000000000000000000 - TBA331958945193"
+    window.entries = [first, last, bridge] if bridge_last else [first, bridge, last]
+    window._configure_scanner_for_audit()
+    window._refresh_table()
+    canonical, suppressed = main_window.canonical_audit_entries(window.entries)
+    assert canonical == [first]
+    assert suppressed == window.duplicate_suppressed_ids == {"bridge", "last"}
+    assert window.table.rowCount() == 1
+    assert window.scanner_coordinator.status()["packages"] == 1
+    assert window.scanner_coordinator.status()["audited"] == 0
+    result = window.scanner_coordinator.process_observation(ScanObservation(barcodes=("TBA331958945193",)))
+    assert result["status"] == "duplicate"
+    assert set(result["related_item_ids"]) == {"first", "bridge", "last"}
+    window._process_scanner_actions()
+    assert window.scanner_coordinator.status()["audited"] == 1
+    assert all(entry.audited for entry in window.entries)
+    window.scanner_coordinator.undo(result["scan_id"])
+    window._process_scanner_actions()
+    assert not first.audited
+    assert window.scanner_coordinator.status()["audited"] == 0
+
+
+def test_phone_scanner_starts_and_stops_with_loaded_entries(window, monkeypatch):
+    class FakeLocalServer:
+        def __init__(self, coordinator):
+            self.coordinator = coordinator
+            self.running = False
+            self.url = "http://127.0.0.1:8765/?pair=123456"
+            self.pairing_code = "123456"
+            self._pairing_expires_at = time.monotonic() + 900
+
+        @property
+        def pairing_seconds_remaining(self):
+            return max(0, int(self._pairing_expires_at - time.monotonic()))
+
+        def start(self):
+            self.running = True
+
+        def stop(self):
+            self.running = False
+
+    monkeypatch.setattr(main_window, "ScannerServer", FakeLocalServer)
     window.entries = [_entry("one", "0205S", "Jane Doe")]
 
     window.start_phone_scanner()
@@ -916,41 +1103,3 @@ def test_phone_scanner_starts_and_stops_with_loaded_entries(window):
 
     window.stop_phone_scanner()
     assert window.scanner_server is None
-
-
-def test_remote_phone_scanner_uses_remote_mode_and_privacy_notice(window, monkeypatch):
-    class FakeRemoteServer:
-        def __init__(self, coordinator, *, remote=False):
-            self.coordinator = coordinator
-            self.remote = remote
-            self.running = False
-            self.tunnel_running = remote
-            self.url = "https://quiet-box.trycloudflare.com/#pair=123456"
-            self.pairing_code = "123456"
-            self.pairing_seconds_remaining = 900
-            self.stopped = False
-
-        def start(self):
-            self.running = True
-
-        def stop(self):
-            self.running = False
-            self.tunnel_running = False
-            self.stopped = True
-
-    monkeypatch.setattr(main_window, "ScannerServer", FakeRemoteServer)
-    window.entries = [_entry("one", "0205S", "Jane Doe")]
-
-    window.start_remote_phone_scanner()
-
-    assert window.scanner_server is not None
-    assert window.scanner_server.remote is True
-    assert window.remote_scanner_button.text() == "Remote Scanner Info"
-    dialog_text = " ".join(label.text() for label in window.scanner_dialog.findChildren(main_window.QLabel))
-    assert "Cloudflare HTTPS tunnel: connected" in dialog_text
-    assert "does not save" in dialog_text
-
-    server = window.scanner_server
-    window.stop_phone_scanner()
-    assert server.stopped
-    assert window.remote_scanner_button.text() == "Remote Phone Scanner"

@@ -208,3 +208,32 @@ def test_clean_lines_removes_buildinglink_page_noise():
     )
 
     assert clean_lines(text) == ["0205S"]
+
+
+def test_package_block_split_across_pages_retains_tracking_and_source_page(tmp_path):
+    path = tmp_path / "split.pdf"
+    pages = [
+        ["1701S", "Unit", "Test Resident", "UPS - #123 - BIN -"],
+        [
+            "Open events - 2",
+            "1Z999AA10123456784",
+            "South Tower 06/15/2026 08:00:00 PM",
+            "1702S",
+            "Unit",
+            "Second Resident",
+            "KEY - #124 - Keys",
+            "South Tower 06/15/2026 09:00:00 PM",
+        ],
+    ]
+    with fitz.open() as doc:
+        for lines in pages:
+            page = doc.new_page()
+            for index, line in enumerate(lines):
+                page.insert_text((50, 50 + index * 20), line)
+        doc.save(path)
+    entries = parse_buildinglink_pdf(path)
+    assert len(entries) == 2
+    assert entries[0].page_index == 0
+    assert entries[0].last4 == "6784"
+    assert entries[0].timestamp == "06/15/2026 08:00:00 PM"
+    assert entries[1].page_index == 1

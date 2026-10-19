@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.audit_report import _format_rows, make_audit_report, write_audit_report
-from app.models import AuditEntry, DoubleLoggedPackage, PackageError
+from app.models import AuditEntry, DoubleLoggedPackage, PackageError, ShiftNote
 
 
 def _entry(unit: str, package: str, audited: bool) -> AuditEntry:
@@ -58,8 +58,8 @@ def test_report_lists_unchecked_entries_sorted():
     assert "1010S" not in s1
     # Unchecked entries are ordered numerically by unit.
     assert report.index("0207S") < report.index("3904S")
-    assert "0207S | USPS | UNSPECIFIED | 5193" in report
-    assert "3904S | AMZ | UNSPECIFIED | 2395" in report
+    assert "0207S | USPS | SHELF | 5193" in report
+    assert "3904S | AMZ | SHELF | 2395" in report
 
 
 def test_report_formats_manual_sections_as_delimited_rows():
@@ -110,9 +110,22 @@ def test_report_uses_ascii_section_rules():
 
 def test_report_shows_none_for_empty_sections():
     report = make_audit_report([], [], [])
-    assert report.count("None") == 3
+    assert report.count("None") == 4
     assert "PACKAGE AUDIT REPORT" in report
     assert "Overall result: Excellent audit" in report
+
+
+def test_report_includes_timestamped_shift_notes():
+    report = make_audit_report(
+        [],
+        [],
+        [],
+        shift_notes=[ShiftNote("Carrier returned with a correction", "2026-09-23T07:14:15+00:00")],
+    )
+
+    assert "5. SHIFT NOTES" in report
+    assert "Carrier returned with a correction" in report
+    assert "09/23/2026" in report
 
 
 def test_report_uses_special_package_type_instead_of_nan_for_open_items():
@@ -128,7 +141,7 @@ def test_report_uses_special_package_type_instead_of_nan_for_open_items():
 
     assert "0101S | FOOD | PERISHABLES | Perishable" in open_section
     assert "0102S | KEY | ALPHA | Keys" in open_section
-    assert "0103S | PKG | UNSPECIFIED | Envelope" in open_section
+    assert "0103S | PKG | SHELF | Envelope" in open_section
     assert "0104S | PKG | SHELF | Alpha" in open_section
     assert "NaN" not in open_section
 
@@ -170,7 +183,7 @@ def test_duplicate_source_rows_appear_only_once_in_open_packages():
 
     open_section = make_audit_report(entries, [], []).split("2. PACKAGE ERRORS")[0]
 
-    assert open_section.count("1001S | UPS | UNSPECIFIED | 6784") == 1
+    assert open_section.count("1001S | UPS | SHELF | 6784") == 1
 
 
 def test_report_emits_matching_custom_unit_percentage_note():

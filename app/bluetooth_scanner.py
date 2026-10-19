@@ -19,9 +19,11 @@ class BluetoothScanner(QObject):
     status_changed = Signal(str)
     paired_changed = Signal(bool)
 
-    def __init__(self, coordinator, flush, verify_saved, parent=None):
+    def __init__(self, coordinator, flush, verify_saved, save_training_sample=None, parent=None):
         super().__init__(parent)
-        self.session = ScannerBluetoothSession(coordinator, flush, verify_saved)
+        self.session = ScannerBluetoothSession(
+            coordinator, flush, verify_saved, save_training_sample=save_training_sample
+        )
         self.service = str(uuid.uuid4())
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self._read)
@@ -93,9 +95,11 @@ class BluetoothScanner(QObject):
                 elif kind == "packet":
                     response = self.session.receive(base64.b64decode(event["data"], validate=True))
                     self._send({"op": "send", "data": encode64(response)})
+                    self.paired_changed.emit(self.session.authenticated)
                     if self.session.authenticated:
-                        self.paired_changed.emit(True)
                         self.status_changed.emit("Phone connected securely • Bluetooth only")
+                    else:
+                        self.status_changed.emit("Authenticating phone…")
                 elif kind in {"ready", "state", "error"}:
                     self.status_changed.emit(event.get("message", "Bluetooth unavailable"))
             except Exception:
@@ -126,7 +130,8 @@ class BluetoothPairingDialog(QDialog):
         scanner.status_changed.connect(self.status.setText)
         scanner.paired_changed.connect(lambda paired: self.qr.setVisible(not paired))
         note = QLabel(
-            "No internet, Wi-Fi, browser, or photos transmitted. Keep the Mac awake.\n"
+            "No internet or Wi-Fi needed. Photos transfer only when you choose training. "
+            "Keep the Mac awake.\n"
             "The pairing key expires when Bluetooth scanning stops or the audit changes."
         )
         note.setWordWrap(True)

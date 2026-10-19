@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.constants import MISSING_LAST4
-from app.models import AuditEntry, normalize_unit
+from app.models import AuditEntry, normalize_unit, split_package_parts
 from app.unit_matching import UnitResolver
 
-_CODE_RE = re.compile(r"[A-Z0-9]{7,40}", re.IGNORECASE)
+_CODE_RE = re.compile(r"(?<![A-Z0-9])[A-Z0-9]{7,40}(?![A-Z0-9])", re.IGNORECASE)
 _LOCATION_WORDS = {
     "ALPHA",
     "BB",
@@ -56,7 +56,7 @@ def extract_tracking_values(text: str, *, trusted: bool = False) -> tuple[str, .
         if _plausible_tracking(normalized, trusted=trusted) and normalized not in found:
             found.append(normalized)
 
-    if trusted:
+    if trusted and "\n" not in text and "\r" not in text:
         add(text)
 
     for line in text.splitlines():
@@ -77,7 +77,7 @@ def extract_tracking_values(text: str, *, trusted: bool = False) -> tuple[str, .
 
 def entry_tracking_values(package_text: str) -> tuple[str, ...]:
     """Extract external tracking values while ignoring the BuildingLink number."""
-    parts = [part.strip() for part in re.split(r"\s+-\s+", package_text) if part.strip()]
+    parts = split_package_parts(package_text)
     found: list[str] = []
     for part in reversed(parts):
         upper = part.upper().strip(",")
@@ -86,6 +86,21 @@ def entry_tracking_values(package_text: str) -> tuple[str, ...]:
         for value in extract_tracking_values(part):
             if value not in found:
                 found.append(value)
+    return tuple(found)
+
+
+def _tracking_pairs(
+    barcodes: tuple[str, ...], barcode_formats: tuple[str, ...]
+) -> tuple[tuple[str, str], ...]:
+    """Pair every extracted tracking value with the barcode format that carried it."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index, barcode in enumerate(barcodes):
+        barcode_format = barcode_formats[index] if index < len(barcode_formats) else ""
+        for value in extract_tracking_values(barcode, trusted=True):
+            if value not in seen:
+                found.append((value, barcode_format))
+                seen.add(value)
     return tuple(found)
 
 
@@ -102,12 +117,14 @@ class ScanObservation:
 
     @property
     def barcode_trackings(self) -> tuple[str, ...]:
-        values: list[str] = []
-        for barcode in self.barcodes:
-            for value in extract_tracking_values(barcode, trusted=True):
-                if value not in values:
-                    values.append(value)
-        return tuple(values)
+        return tuple(value for value, _barcode_format in _tracking_pairs(self.barcodes, self.barcode_formats))
+
+    @property
+    def barcode_tracking_formats(self) -> tuple[str, ...]:
+        """Return formats aligned one-to-one with :attr:`barcode_trackings`."""
+        return tuple(
+            barcode_format for _value, barcode_format in _tracking_pairs(self.barcodes, self.barcode_formats)
+        )
 
     @property
     def reliable_barcode_trackings(self) -> tuple[str, ...]:
@@ -135,8 +152,14 @@ class ScanObservation:
     def scan_key(self) -> str:
         payload = json.dumps(
             {
-                "barcodes": sorted(set(self.barcodes)),
-                "units": sorted(set(self.unit_candidates)),
+                "barcodes": sorted(
+                    (code, self.barcode_formats[index] if index < len(self.barcode_formats) else "")
+                    for index, code in enumerate(self.barcodes)
+                ),
+                "units": sorted(
+                    (unit, self.unit_confidences[index] if index < len(self.unit_confidences) else 0.0)
+                    for index, unit in enumerate(self.unit_candidates)
+                ),
                 "unit_scan": self.unit_scan_attempted,
             },
             separators=(",", ":"),
@@ -152,6 +175,7 @@ class AuditMatchRecord:
     trackings: tuple[str, ...]
     last4: str
     audited: bool
+    carrier: str
 
     @classmethod
     def from_entry(cls, entry: AuditEntry) -> AuditMatchRecord:
@@ -162,6 +186,7 @@ class AuditMatchRecord:
             trackings=entry_tracking_values(entry.package),
             last4=entry.last4,
             audited=entry.audited,
+            carrier=entry.report_carrier,
         )
 
 
@@ -221,6 +246,28 @@ class ScanDecision:
         }
 
 
+def tracking_components(trackings_by_row: list[tuple[str, ...]]) -> list[tuple[int, ...]]:
+    """Group overlapping tracking identities, retaining the earliest row as canonical."""
+    parents = list(range(len(trackings_by_row)))
+
+    def root(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    owners: dict[str, int] = {}
+    for index, trackings in enumerate(trackings_by_row):
+        for tracking in trackings:
+            previous = owners.setdefault(tracking, index)
+            left, right = root(previous), root(index)
+            parents[max(left, right)] = min(left, right)
+    groups: dict[int, list[int]] = {}
+    for index in range(len(parents)):
+        groups.setdefault(root(index), []).append(index)
+    return [tuple(indices) for indices in groups.values()]
+
+
 class PackageMatcher:
     """Require exact tracking and, for native scans, compatible unit identity."""
 
@@ -228,14 +275,13 @@ class PackageMatcher:
         self.unit_resolver = UnitResolver(unit_aliases)
         self.records = [AuditMatchRecord.from_entry(entry) for entry in entries]
         self.records_by_id = {record.item_id: record for record in self.records}
-        self.physical_records: list[AuditMatchRecord] = []
-        claimed_trackings: set[str] = set()
-        for record in self.records:
-            trackings = set(record.trackings)
-            if trackings and trackings & claimed_trackings:
-                continue
-            self.physical_records.append(record)
-            claimed_trackings.update(trackings)
+        components = tracking_components([record.trackings for record in self.records])
+        self.physical_records = [self.records[indices[0]] for indices in components]
+        self.related_records: dict[str, tuple[AuditMatchRecord, ...]] = {}
+        for indices in components:
+            records = tuple(self.records[index] for index in indices)
+            for record in records:
+                self.related_records[record.item_id] = records
         self.tracking_index: dict[str, list[AuditMatchRecord]] = {}
         for record in self.records:
             for tracking in record.trackings:
@@ -264,21 +310,32 @@ class PackageMatcher:
             )
 
         duplicate_tracking = next(
-            (tracking for tracking in trackings if len(self.tracking_index.get(tracking, ())) > 1),
+            (
+                tracking
+                for tracking in trackings
+                if any(
+                    len(self.related_records[record.item_id]) > 1
+                    for record in self.tracking_index.get(tracking, ())
+                )
+            ),
             "",
         )
         if duplicate_tracking:
-            records = self.tracking_index[duplicate_tracking]
+            records = self.related_records[self.tracking_index[duplicate_tracking][0].item_id]
             candidates = tuple(self._candidate(record, duplicate_tracking) for record in records)
             units = sorted({record.unit for record in records})
             return ScanDecision(
                 status="duplicate",
                 confidence=1.0,
-                message=f"This tracking number is logged more than once: {', '.join(units)}.",
+                message=f"Overlapping tracking numbers link duplicate audit rows: {', '.join(units)}.",
                 candidates=candidates,
                 tracking=duplicate_tracking,
                 location=" / ".join(sorted({record.location for record in records})),
-                carrier=observation.carrier,
+                carrier=(
+                    records[0].carrier
+                    if len({record.carrier for record in records}) == 1
+                    else observation.carrier
+                ),
                 scan_key=observation.scan_key,
                 related_item_ids=tuple(record.item_id for record in records),
                 scanned_units=observation.unit_candidates,
@@ -323,7 +380,7 @@ class PackageMatcher:
                         tracking=tracking,
                         unit=record.unit,
                         location=record.location,
-                        carrier=observation.carrier,
+                        carrier=record.carrier,
                         scan_key=observation.scan_key,
                         related_item_ids=(record.item_id,),
                         scanned_units=verification.scanned_units,
@@ -341,7 +398,7 @@ class PackageMatcher:
                         tracking=tracking,
                         unit=record.unit,
                         location=record.location,
-                        carrier=observation.carrier,
+                        carrier=record.carrier,
                         scan_key=observation.scan_key,
                         related_item_ids=(record.item_id,),
                         scanned_units=verification.scanned_units,
@@ -366,7 +423,7 @@ class PackageMatcher:
                 tracking=tracking,
                 unit=record.unit,
                 location=record.location,
-                carrier=observation.carrier,
+                carrier=record.carrier,
                 scan_key=observation.scan_key,
                 related_item_ids=(record.item_id,),
                 scanned_units=scanned_units,

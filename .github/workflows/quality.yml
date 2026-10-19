@@ -52,7 +52,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Scan source for common security issues
-        run: uv run bandit -q -r app main.py
+        run: uv run bandit -q -r app scripts main.py
 
       - name: Audit locked dependencies
         run: uv run pip-audit

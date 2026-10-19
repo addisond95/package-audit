@@ -65,7 +65,8 @@ class AuditEntry:
         }
         if self.package_type in special:
             return special[self.package_type]
-        first = re.split(r"\s+-\s+", self.package, maxsplit=1)[0]
+        parts = split_package_parts(self.package)
+        first = parts[0] if parts else ""
         return normalize_carrier(first) or "PKG"
 
     @property
@@ -79,7 +80,7 @@ class AuditEntry:
             return "PERISHABLES"
         if self.package_type in {PackageType.KEYS, PackageType.ALPHA} and "ALPHA" in upper:
             return "ALPHA"
-        return "UNSPECIFIED"
+        return "SHELF"
 
     @property
     def search_text(self) -> str:
@@ -169,6 +170,15 @@ class AuditNoteRule:
     rule_id: int | None = None
 
 
+@dataclass
+class ShiftNote:
+    """A timestamped operator note attached to one audit."""
+
+    text: str
+    created_at: str
+    note_id: int | None = None
+
+
 def normalize_unit(unit: str) -> str:
     return unit.strip().upper()
 
@@ -250,6 +260,11 @@ def infer_package_type(package_text: str) -> PackageType:
     return PackageType.PACKAGE
 
 
+def split_package_parts(package_text: str) -> list[str]:
+    """Separate BuildingLink fields, including exports with a tight ``-#`` marker."""
+    return [part.strip() for part in re.split(r"\s*-\s*(?=#)|\s+-\s+", package_text) if part.strip()]
+
+
 def extract_last4(package_text: str) -> str:
     """
     Try to extract the last four characters of the tracking number.
@@ -267,7 +282,7 @@ def extract_last4(package_text: str) -> str:
     if not text:
         return MISSING_LAST4
 
-    parts = [part.strip() for part in text.split(" - ") if part.strip()]
+    parts = split_package_parts(text)
     candidates = list(reversed(parts))
 
     location_words = {

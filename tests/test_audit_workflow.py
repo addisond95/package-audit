@@ -41,6 +41,18 @@ def test_assessment_uses_distinct_units_not_package_rows():
     assert result.affected_units == frozenset({"1701S"})
 
 
+def test_late_bridge_between_tracking_aliases_has_one_canonical_row():
+    entries = [
+        _entry("first", "1Z999AA10123456784"),
+        _entry("second", "9400000000000000000000"),
+        _entry("bridge", "1Z999AA10123456784 - 9400000000000000000000"),
+        _entry("without-tracking", ""),
+    ]
+    canonical, suppressed = canonical_audit_entries(entries)
+    assert [entry.item_id for entry in canonical] == ["first", "without-tracking"]
+    assert suppressed == {"second", "bridge"}
+
+
 def test_duplicate_combined_units_are_counted_once_each():
     entries = [
         _entry("a", "TRACKING00000001", True, "1701S"),
@@ -65,7 +77,7 @@ def test_assessment_weighting_scales_with_number_of_units():
         [PackageError("1000S", "BIN", "UPS", "1234", "Wrong unit")],
         [DoubleLoggedPackage("1001S", "BIN", "UPS", "5678")],
     )
-    assert result.total == 20
+    assert result.total_units == 20
     assert result.error_rate == 5.0
     assert result.duplicate_rate == 5.0
     assert result.score == 94.5

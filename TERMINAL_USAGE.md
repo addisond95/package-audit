@@ -57,7 +57,7 @@ The original PDF is never overwritten by a highlighted-PDF export.
 ## Connect your Samsung offline over Bluetooth
 
 1. Install the native **Package Audit Scanner** APK once, following [BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md).
-2. Turn on Bluetooth on both devices. Internet, Wi-Fi, hotspot, and Cloudflare are not needed.
+2. Turn on Bluetooth on both devices. Internet, Wi-Fi, and hotspot are not needed.
 3. Open an audit PDF on the Mac and click **Bluetooth Phone Scanner**. Allow Bluetooth permission if prompted.
 4. In the Android app, tap **Pair with Mac** and scan that window's QR code. Do not use the Samsung camera app
    or the macOS Bluetooth pairing screen; pairing happens inside Package Audit.
@@ -84,7 +84,7 @@ Stop the scanner on the Mac when finished. Opening a different audit requires a 
 6. On the phone, tap **Scan package** once and hold one tracking barcode inside the green live guide. The page
    reads it automatically; there is no shutter, camera preview, or Submit button. Use **Existing photo** only as
    a fallback. If the browser blocks live camera access on the local HTTP address, **Scan package** switches to
-   the phone's normal camera-photo screen; use Remote mode for the full HTTPS live-camera workflow.
+   the phone's normal camera-photo screen. Use the native Bluetooth app for continuous scanning.
 7. The phone displays the unit logged for that exact tracking number. Check the unit against the box label,
    then tap **Confirm unit …** to mark it present. Tap **Wrong barcode — rescan** if the wrong barcode was read,
    or **Scan next package** to resume the already-open live camera.
@@ -95,31 +95,6 @@ Stop the scanner on the Mac when finished. Opening a different audit requires a 
 The pairing code accepts new phones for 15 minutes. A phone that is already paired stays connected until the
 scanner stops or a different audit is loaded. Tracking values and fallback camera images are processed in memory
 on the Mac and are not saved.
-
-## Optional: connect a phone browser on public Wi-Fi or through VPNs
-
-Install `cloudflared` once if you skipped it during setup:
-
-```bash
-brew install cloudflared
-cloudflared --version
-```
-
-Then:
-
-1. Leave the VPN enabled on both the Mac and phone. They do not need to be on the same Wi-Fi, but both need
-   internet access.
-2. Open the audit PDF and click **Remote Phone Scanner**.
-3. Wait for **Cloudflare HTTPS tunnel: connected**, then scan the new QR code with the phone. The app verifies
-   the temporary address before displaying it and automatically retries once if Cloudflare returns a bad address.
-4. Tap **Connect to desktop**. The QR link fills the six-digit code automatically; it is not sent to Cloudflare
-   in the initial address request.
-5. Scan and confirm packages exactly as in Local mode.
-6. Click **Stop Scanner** when finished. This shuts down the temporary public address immediately.
-
-Remote mode is free and does not require a Cloudflare account. The address changes on every start and is not a
-permanent hosted service. The encrypted requests, decoded tracking values, and any fallback live camera crops
-pass through Cloudflare on their way to the Mac. Package Audit does not save them.
 
 ## Phone connection troubleshooting
 
@@ -134,21 +109,7 @@ If the phone cannot open the Local scanner page:
 6. Stop and restart the phone scanner after changing Wi-Fi, after the pairing code expires, or if the Mac wakes
    on a different network. Then scan the new QR code.
 
-For the native Android app, use **Bluetooth Phone Scanner** to avoid network routing entirely. If using a
-browser, **Remote Phone Scanner** is the optional internet-based alternative.
-
-If Remote mode does not start:
-
-1. Run `cloudflared --version`. If it is missing, run `brew install cloudflared`.
-2. Confirm the Mac can load ordinary HTTPS sites through its current VPN.
-3. Stop and restart Remote mode to request a fresh address.
-4. If the error mentions `config.yml` or `config.yaml`, temporarily move your existing Cloudflare Tunnel config;
-   Quick Tunnels cannot run while that config is active.
-5. If `cloudflared` is installed somewhere unusual, launch with its full path configured:
-
-   ```bash
-   PACKAGE_AUDIT_CLOUDFLARED=/full/path/to/cloudflared uv run package-audit
-   ```
+Use **Bluetooth Phone Scanner** in the native Android app to avoid network routing entirely.
 
 If the page opens but scans fail, keep the app running, use a sharp well-lit image, fill the frame with only
 the tracking barcode, and check that the pairing window says **Tracking barcode scanner: Ready**.
@@ -167,17 +128,11 @@ cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
 uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
-uv run bandit -q -r app main.py
+uv run bandit -q -r app scripts main.py
 uv run pip-audit
 uv run python main.py --scanner-smoke
 uv run python main.py --export-smoke
 uv run python main.py --ui-smoke
-```
-
-To test the external service too, run this separately; it needs `cloudflared` and internet access:
-
-```bash
-uv run python main.py --remote-scanner-smoke
 ```
 
 The scanner tests and smoke test open a temporary local port, so macOS or security software may ask for local

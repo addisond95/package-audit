@@ -12,6 +12,7 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-ml
 
 # Android build state and signing keys stay local
 .gradle/
@@ -21,13 +22,19 @@ local.properties
 .signing/
 *.apk
 
+# Trained models and decrypted dataset exports are generated locally.
+models/releases/*
+!models/releases/.gitkeep
+android/app/src/main/assets/package_audit_label.onnx
+android/app/src/main/assets/package_audit_model_manifest.json
+android/app/src/main/assets/package_audit_model_manifest.sig
+android/app/src/main/assets/package_audit_model_public.pem
+
 # macOS
 .DS_Store
 **/.DS_Store
 
 # PyInstaller artefacts
-build/
-dist/
 *.spec.bak
 
 # Source files and generated exports may contain resident data — keep them local

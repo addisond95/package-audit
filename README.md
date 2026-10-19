@@ -5,14 +5,19 @@ paper markups and retyped discrepancy notes with a searchable desktop audit, aut
 structured exception records, and a direct offline Android scanner.
 
 The primary scanner workflow is a Samsung/Android phone connected directly to a Mac over Bluetooth Low Energy:
-no browser, Wi-Fi, hotspot, internet connection, Cloudflare tunnel, account, or subscription is needed during
+no browser, Wi-Fi, hotspot, internet connection, account, or subscription is needed during
 an audit.
 
 > Status: versions 0.10 and 0.11 completed successful real package-room audits on a Mac and Samsung Galaxy S24
-> Ultra. Version 0.13 adds package-location results, scan-to-alert creation, and consistent dated export names
-> on top of the v0.12 unit-reading workflow. The release passes automated, Android release-build, and packaged-Mac
-> checks and is installed on the test S24 Ultra. Real shipping-label verification during an audit is still required. It is not
+> Ultra. Version 0.17 adds an end-to-end, non-agentic supervised vision-model workflow plus direct encrypted
+> confirmed-label collection from the phone: visual annotation,
+> immutable train/validation/test datasets, PyTorch training, held-out evaluation, signed ONNX releases, and
+> verified offline Android inference. The release
+> passes automated, Android release-build, and packaged-Mac checks. Real shipping-label verification during an audit is still required. It is not
 > yet a notarized macOS release, Play Store release, or formally independently security-audited product.
+
+The [September 2026 audit report](AUDIT_REPORT.md) records the repaired defects, connected-phone checks,
+build locations, and remaining validation limits. The repaired Mac bundle is `dist/audited/Package Audit.app`.
 
 ## What it does today
 
@@ -25,6 +30,7 @@ an audit.
 - Saves audit progress locally in SQLite and restores it when the same PDF is reopened.
 - Keeps package errors and double-logged packages in spreadsheet-style editable tables.
 - Keeps unmatched scans in Alerts until you rescan/dismiss them or convert them to a categorized Package Error.
+- Saves timestamped shift notes immediately and includes them in a dedicated section of the Audit TXT report.
 - Provides built-in and locally customizable error-reason templates for consistent final reporting.
 - Collapses duplicate tracking records into one physical audit row while retaining one Double Logged summary.
 - Classifies Package, Perishable, Keys, Envelope, and Alpha audit entries and shows the type in the audit table.
@@ -44,7 +50,7 @@ an audit.
 - Combines a bundled on-device ML Kit detector with the local ZXing fallback, higher-resolution analysis,
   automatic zoom suggestions, center refocus, and an aiming guide for difficult shipping labels.
 - Sends only decoded barcode values, normalized unit candidates/confidences, and audit responses through the
-  encrypted Bluetooth connection to the Mac. It does not send camera images or resident names.
+  encrypted Bluetooth connection to the Mac. Routine scanning does not send camera images or resident names.
 - Uses one-time QR pairing for each scanner/audit session; normal macOS Bluetooth-device pairing is not used.
 - Requires an exact full tracking match and, in normal **Tracking + unit** mode, verifies the label's unit-number
   identity against the audit. Building suffixes and leading zeroes are abstracted (`2803` matches `2803S`), but
@@ -55,8 +61,8 @@ an audit.
 - A clear unit conflict automatically creates a Mac alert carrying both the audit unit and label unit and warns
   the phone operator to investigate. It does not mark the row present.
 - Shows the package's audit location (such as BIN, BB, CAGE, or FCR) with a successful tracking result.
-- Provides **Scan package into alert**: scan tracking and unit, choose the physical location, and save a manual
-  alert on the Mac without retyping those package details.
+- Provides **Scan package into alert**: scan tracking and unit, choose the tracking value when a label has multiple
+  usable carrier codes, choose the physical location, and save a manual alert without retyping package details.
 - Returns to live scanning automatically after a saved confirmation. Flashlight, tap-to-focus, wrong-barcode
   rescan, and undo are available on the phone.
 - Preserves reliable unknown tracking numbers in Alerts and detects duplicate tracking values for review.
@@ -66,9 +72,20 @@ an audit.
   and tracking into final review; entering the correct unit generates the complete mislog reason automatically.
 - Briefly collects stable codes from multi-barcode labels so USPS/FedEx or other carrier values are all checked
   against the audit before the result is decided.
+- Lets an explicit rescan read the same label immediately after a failed result, and bounds label payloads before
+  transmission so a data-heavy QR cannot tear down the Bluetooth session.
 - Stores a bounded local feedback profile of scan outcomes and barcode formats without images, names, tracking
   values, or raw unit values. A separate local alias map retains confirmed normalized label/audit unit pairs;
   this supports safe tuning but does not claim that ML Kit retrains itself or learns destroyed barcodes.
+- Recognizes distinctive documented UPS, USPS, and Amazon tracking structures and learns privacy-safe structural
+  carrier fingerprints only from confirmed audit matches. Carrier classification never replaces exact tracking matching.
+- A successful match offers **Confirm unit** and **Confirm + add label to training**. The second option first
+  marks the package on the Mac, then sends one bounded JPEG through the encrypted Bluetooth connection into the
+  Mac's local encrypted Pending training dataset. It requires no file chooser or separate import.
+- Provides **Save standalone training example** and `.pasample` export for failures or unusual labels that do
+  not reach confirmation. Routine scans continue to retain no photos.
+- Can load an approved, cryptographically signed ONNX label model entirely offline. Model carrier/condition
+  predictions are advisory; they never replace exact tracking-number matching.
 - Confirms the SQLite save on the Mac before it tells the phone that a package is saved. Reconnect retries use
   idempotent request IDs so an interrupted confirmation is not applied twice.
 
@@ -80,8 +97,7 @@ an audit.
   messages, replay protection, and a bounded reconnect strategy. See [BLUETOOTH_PROTOCOL.md](BLUETOOTH_PROTOCOL.md).
 - Audit state remains in `~/.package_audit/audit_state.sqlite3` on the Mac. Use macOS account protection and
   full-disk encryption for production records; SQLite data is not encrypted by this application.
-- Optional legacy browser scanners remain available for local Wi-Fi or temporary Cloudflare access, but they are
-  not required for the native Android Bluetooth workflow. Remote browser mode sends traffic through Cloudflare.
+- An optional local browser scanner remains available over trusted Wi-Fi for tracking-only lookups.
 
 ## Requirements
 
@@ -89,7 +105,7 @@ For the recommended offline workflow:
 
 - macOS with Bluetooth and Apple Command Line Tools
 - Python 3.10+ and [uv](https://docs.astral.sh/uv/)
-- Android 12+ phone with Bluetooth LE and a camera (the current tested device is Samsung Galaxy S24 Ultra)
+- Android 12+ ARM64 phone with Bluetooth LE and a camera (the current tested device is Samsung Galaxy S24 Ultra)
 - The locally built `Package Audit Scanner` Android APK installed once
 
 Internet is needed only to install development dependencies or build tools. It is not needed while auditing over
@@ -125,9 +141,12 @@ Then:
 4. Wait for **Connected securely • Bluetooth only**.
 5. Leave **Mode: Tracking + unit** selected, tap **Scan packages** once, and keep the tracking barcode plus the
    destination unit visible. For a tracking-only label, switch to **Mode: Tracking only**.
-6. If both values match, confirm the result. If the unit cannot be read, compare the displayed audit unit and
-   confirm manually, rescan, or flag it. Never confirm a clear mismatch.
-7. Wait for **Saved on Mac**. The phone resumes scanning for the next package automatically.
+6. If both values match, choose **Confirm unit** for the normal image-free audit action, or **Confirm + add label
+   to training** to save the package and send that label into the Mac's encrypted Pending dataset. If the unit
+   cannot be read, compare the displayed audit unit and confirm manually, rescan, or flag it. Never confirm a
+   clear mismatch.
+7. Wait for **Saved on Mac**. A selected training image may take several additional seconds over Bluetooth; the
+   phone reports when it is stored and then resumes scanning automatically.
 8. For a package that needs an operator-created exception, tap **Scan package into alert**, scan its label, and
    choose its physical location. The Mac retains it in Alerts for final review.
 9. Click **Stop Bluetooth Scanner** on the Mac when finished, then export any needed report.
@@ -140,7 +159,7 @@ public Wi-Fi, mobile data, and hotspot configuration do not affect Bluetooth sca
 The signed installer produced by this workspace is:
 
 ```text
-dist/PackageAuditScanner-0.13.0.apk
+dist/PackageAuditScanner-0.17.0.apk
 ```
 
 Enable **USB debugging** in Android Developer options, connect an unlocked phone with a USB data cable, approve
@@ -149,7 +168,7 @@ the Mac's debugging key, and run:
 ```bash
 cd /Users/aldorevenwaters/workspaces/personal_projects/package-audit
 adb devices -l
-adb install -r dist/PackageAuditScanner-0.13.0.apk
+adb install -r dist/PackageAuditScanner-0.17.0.apk
 ```
 
 The device must display `device` in the first command. Choose **Transferring files / Android Auto** for the USB
@@ -158,6 +177,22 @@ unplug the cable, and disable USB debugging again if you do not otherwise need i
 
 For detailed installation, recovery, range, privacy, and real-hardware acceptance instructions, read
 [BLUETOOTH_USAGE.md](BLUETOOTH_USAGE.md).
+
+## Local label training examples
+
+After a successful match, choose **Confirm + add label to training** to save the audit result and transfer that
+label directly over encrypted Bluetooth. The Mac strips embedded image metadata, encrypts the image and metadata,
+adds it as Pending, and immediately displays it in **Training Data**. Normal **Confirm unit** saves no image.
+
+For a missed, damaged, or unusual label that cannot reach confirmation, use **Save standalone training example**.
+Transfer the resulting `.pasample` file to the Mac, open **Training Data**, and choose **Import Phone Examples**.
+
+The transport file itself is not encrypted and may contain resident information, so import it promptly and
+delete the shared copy. Collected examples remain Pending and cannot train a model until reviewed and annotated.
+Double-click an example or select **Review / Annotate Selected**, draw the relevant regions, set its carrier,
+condition, capture group, and split, then approve it. **Freeze Dataset Version** creates an immutable manifest
+only when train, validation, and test are populated and capture groups do not cross splits.
+See [TRAINING_DATA.md](TRAINING_DATA.md) for the carrier-learning rules, API, security boundary, and limitations.
 
 ## Core workflow details
 
@@ -216,21 +251,14 @@ package/error occurrences. Use **Audit Note Rules…** in Alerts to add custom m
 Source PDFs, generated reports, APKs, build products, and signing material are ignored by Git to reduce the
 risk of committing resident or credential data.
 
-## Optional browser scanner modes
+## Optional local browser scanner
 
-These pre-existing modes remain available but are not the recommended solution for the offline workflow:
+**Local Phone Scanner** connects a phone browser to the Mac over the same trusted, non-guest Wi-Fi network.
+It provides tracking-only lookup and manual unit confirmation. Browsers that block live camera access on a
+local HTTP address use the camera-photo fallback; use the native Bluetooth app for continuous offline scanning
+and unit verification.
 
-- **Local Phone Scanner**: phone browser and Mac must reach one another on a trusted non-guest Wi-Fi network.
-- **Remote Phone Scanner**: uses free, temporary Cloudflare Quick Tunnel access when devices are on separate
-  networks or using VPNs. It requires internet and Cloudflare receives the proxied traffic.
-
-Install Cloudflare's utility only if you specifically need remote browser scanning:
-
-```bash
-brew install cloudflared
-```
-
-See [TERMINAL_USAGE.md](TERMINAL_USAGE.md) for full browser-mode instructions and troubleshooting.
+See [TERMINAL_USAGE.md](TERMINAL_USAGE.md) for local browser instructions and troubleshooting.
 
 ## Test before a production audit
 
@@ -265,9 +293,10 @@ uv run pip-audit
 uv run python main.py --scanner-smoke
 uv run python main.py --export-smoke
 uv run python main.py --ui-smoke
+.venv-ml/bin/python scripts/ml_smoke.py
 ```
 
-Build the signed Android APK from source (JDK 17, Android SDK platform 35, and Build Tools 35.0.0 required):
+Build the signed Android APK from source (JDK 17, Android SDK platform 36, and Build Tools 35.0.0 required):
 
 ```bash
 uv run python scripts/build_android.py
@@ -304,13 +333,17 @@ package-audit/
 
 - The native Bluetooth desktop receiver currently targets macOS; the Android app is not a general iOS scanner.
 - Android installation is currently a local signed APK, not Play Store distribution.
+- The Android build currently targets ARM64 phones and its interface text is English-only; ChromeOS/x86 packaging
+  and localization are outside the current field-audit scope.
 - macOS packaging is currently local and not notarized; macOS may require normal local-app approval.
 - Pairing credentials and pending requests intentionally stay in memory. If either app process restarts during a
   pending confirmation, check the Mac audit before continuing and pair again.
 - Bluetooth range and barcode/OCR performance depend on real room layout, metal shelving, lighting, label
   quality, address layout, and supported barcode formats. Manual and tracking-only fallbacks remain necessary.
-- Local learning is intentionally conservative: it records privacy-safe aggregate outcomes and bounded confirmed
-  unit aliases. It does not store label photos or train a custom damaged-barcode vision model.
+- No trustworthy production label model is bundled until enough representative, human-reviewed real labels meet
+  the release gate. The training/deployment machinery is operational, but a tiny or biased dataset is rejected.
+- The current vision model predicts carrier family, primary label condition, and model-relevant regions. Existing
+  ML Kit/ZXing/OCR still performs decoding; generative reconstruction of missing digits is forbidden.
 - Browser scanner modes remain for compatibility, but their networking/security behavior differs from the
   offline Bluetooth mode.
 
@@ -320,21 +353,38 @@ For the product roadmap and working field-test checklist, see [ROADMAP.md](ROADM
 
 The best next work should be driven by observations from real audits. In priority order:
 
-1. **Operational polish:** measure the v0.12 barcode-plus-unit scanner against the real label mix, capturing
+1. **Collect representative examples:** explicitly save useful successes and failures across carriers, layouts,
+   lighting, damage, and multi-label packages; do not collect only difficult failures.
+2. **Annotate and freeze datasets:** keep capture sessions together in one split and preserve the held-out test
+   set for final evaluation only.
+3. **Train and pilot:** train candidates, deploy only releases that pass the gate, and compare live performance
+   against the fixed scanner baseline before expanding use.
+4. **Operational polish:** measure the barcode-plus-unit scanner against the real label mix, capturing
    latency, unit-read/mismatch accuracy, remaining misses, glare/damage conditions, and confusing wording.
-2. **Scan quality and recovery:** use those missed-label examples to tune supported formats, camera behavior,
+5. **Scan quality and recovery:** use those missed-label examples to tune supported formats, camera behavior,
    guidance for multi-label/damaged labels, and reconnect handling without weakening exact matching.
-3. **Production packaging:** make a repeatable release process, preserve the Android signing key safely, and add
+6. **Production packaging:** preserve the Android and model signing keys safely, and add
    macOS Developer ID signing/notarization before distributing to other Macs.
-4. **Field hardening:** test the real package-room range, battery behavior, different Samsung/Android versions,
+7. **Field hardening:** test the real package-room range, battery behavior, different Samsung/Android versions,
    and audit interruption/recovery procedures; keep a small pre-audit acceptance checklist.
-5. **Product decisions:** define user roles, supported property-management exports, onboarding, update delivery,
+8. **Product decisions:** define user roles, supported property-management exports, onboarding, update delivery,
    support/privacy policy, and whether the browser scanner should remain a supported fallback.
-6. **Only after the core flow is stable:** consider multi-building configuration, richer operational reporting,
+9. **Only after the core flow is stable:** consider multi-building configuration, richer operational reporting,
    scanner analytics that respect privacy, and support for additional hardware/platforms.
 
 ## Version history
 
+- **v0.17.0** — two-choice phone confirmation with direct encrypted, chunked label transfer into the Mac's local
+  Pending training set; normal confirmation remains image-free and standalone `.pasample` capture remains available.
+- **v0.16.0** — visual Mac annotation, capture-group-safe immutable dataset versions, isolated PyTorch transfer
+  learning, held-out evaluation and release thresholds, ONNX parity verification, Ed25519-signed model releases,
+  reproducible deployment/rollback tooling, and verified offline Android ONNX inference with telemetry removed.
+- **v0.15.0** — documented carrier-format recognition, confirmed-scan carrier structure learning without stored
+  tracking values, explicit offline Android label-example capture, encrypted local training storage, a Mac
+  Training Data import view, and an authenticated loopback dataset API with review and deletion operations.
+- **v0.14.0** — reliable same-label retry after failed scans, bounded multi-code Bluetooth payloads that do not
+  disconnect the scanner, a two-stage phone alert scan with tracking selection for multi-barcode labels,
+  timestamped per-audit shift notes in the desktop and text report, and SHELF as the fallback open-package location.
 - **v0.13.0** — audit location shown on phone scan results, phone-created alerts populated from scanned
   tracking/unit plus an operator-selected location, location-aware desktop alert review, and standardized
   `YYYY_MMDD_package_audit` export filenames.
@@ -352,5 +402,4 @@ The best next work should be driven by observations from real audits. In priorit
   pairing, exact tracking-only matching, explicit unit confirmation, save verification, reconnect/idempotence,
   undo, signed local APK build, and disposable S24/Mac hardware acceptance test.
 - **v0.8.0** — one-tap browser live-camera tracking scan with two-frame stability checks.
-- **v0.7.0** — optional temporary Cloudflare remote browser scanner.
 - **v0.6.0** — tracking-only matching, explicit unit confirmation, and keyboard-first desktop auditing.

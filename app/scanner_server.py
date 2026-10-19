@@ -11,17 +11,16 @@ import socket
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
-from urllib.parse import urlparse
 
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, session, url_for
 from werkzeug.serving import BaseWSGIServer, WSGIRequestHandler, make_server
 
+from app.carrier_matching import classify_carrier
 from app.constants import LOCATIONS
 from app.models import AuditEntry, normalize_location
 from app.scanner_matching import PackageMatcher, ScanDecision, ScanObservation
-from app.scanner_tunnel import CloudflareQuickTunnel, TunnelStartupError
 from app.scanner_vision import (
     MAX_IMAGE_BYTES,
     ScanImageError,
@@ -37,7 +36,8 @@ PHONE_ACTIVE_SECONDS = 15
 LIVE_STABILITY_HITS = 2
 LIVE_STABILITY_SECONDS = 3.0
 MAX_LIVE_BARCODES = 8
-MAX_LIVE_BARCODE_LENGTH = 2048
+MAX_LIVE_BARCODE_LENGTH = 1024
+MAX_LIVE_BARCODE_PAYLOAD = 4096
 
 
 class ScannerBusyError(RuntimeError):
@@ -80,6 +80,7 @@ class ScannerCoordinator:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._actions: queue.Queue[ScannerAction] = queue.Queue()
+        self._retry_actions: deque[ScannerAction] = deque()
         self._scans: dict[str, _StoredScan] = {}
         self._scan_ids_by_key: dict[str, str] = {}
         self._matcher = PackageMatcher([])
@@ -87,6 +88,7 @@ class ScannerCoordinator:
         self._entries: list[AuditEntry] = []
         self._pdf_hash = ""
         self._alert_summary: dict[str, int] = {}
+        self._learning_model: dict[str, Any] = {}
         self._phone_clients: dict[str, float] = {}
         self._generation = 0
         self._scan_slots = threading.BoundedSemaphore(2)
@@ -110,9 +112,19 @@ class ScannerCoordinator:
     ) -> None:
         with self._lock:
             self._entries = entries
-            self._matcher = PackageMatcher(entries, self._unit_aliases)
+            matcher = PackageMatcher(entries, self._unit_aliases)
             if pdf_hash != self._pdf_hash or reset_scans:
                 self._invalidate_sessions_locked()
+            else:
+                changed = {
+                    item_id
+                    for item_id in self._matcher.records_by_id.keys() | matcher.records_by_id.keys()
+                    if self._matcher.records_by_id.get(item_id) != matcher.records_by_id.get(item_id)
+                }
+                for stored in self._scans.values():
+                    if changed.intersection(stored.decision.related_item_ids):
+                        self._forget_scan_key(stored)
+            self._matcher = matcher
             self._pdf_hash = pdf_hash
 
     def invalidate_sessions(self) -> None:
@@ -121,6 +133,7 @@ class ScannerCoordinator:
             self._invalidate_sessions_locked()
 
     def _invalidate_sessions_locked(self) -> None:
+        self._retry_actions.clear()
         self._scans.clear()
         self._scan_ids_by_key.clear()
         self._generation += 1
@@ -140,6 +153,7 @@ class ScannerCoordinator:
         raw_aliases = (model or {}).get("unit_aliases", {})
         aliases = raw_aliases if isinstance(raw_aliases, dict) else {}
         with self._lock:
+            self._learning_model = dict(model or {})
             self._unit_aliases = {
                 str(label)[:16]: str(unit)[:16]
                 for label, unit in list(aliases.items())[:500]
@@ -229,6 +243,7 @@ class ScannerCoordinator:
             self._require_generation(expected_generation)
             if not self._pdf_hash or not self._matcher.records:
                 raise RuntimeError("Open an audit PDF on the desktop before scanning.")
+            observation = self._with_learned_carrier(observation)
             self._prune_scans()
             # A failed decode has an empty barcode set and therefore no stable
             # package identity. Never cache it: the very next photo may be a
@@ -281,38 +296,141 @@ class ScannerCoordinator:
             if normalized_location not in {normalize_location(value) for value in LOCATIONS}:
                 raise ValueError("Choose a package location from the phone list.")
 
-            matched = self._matcher.decide(observation)
-            if matched.status == "poor_scan" or not matched.tracking:
-                raise ValueError("One clear tracking barcode is required. Isolate it and scan again.")
+            prepared = self._prepare_manual_alert_locked(observation)
+            options = prepared["tracking_options"]
+            if len(options) != 1:
+                raise ValueError("Choose one tracking barcode for this alert.")
+            return self._create_manual_alert_locked(prepared["scan_id"], options[0], normalized_location)
 
-            scan_id = secrets.token_hex(8)
-            decision = ScanDecision(
-                status="manual_alert",
-                confidence=matched.confidence,
-                message="Package alert saved for end-of-audit review.",
-                candidates=matched.candidates,
-                tracking=matched.tracking,
-                unit=matched.unit,
+    def prepare_manual_alert(
+        self,
+        observation: ScanObservation,
+        *,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Decode an alert label and return explicit tracking choices without saving yet."""
+        with self._lock:
+            self._require_generation(expected_generation)
+            if not self._pdf_hash or not self._matcher.records:
+                raise RuntimeError("Open an audit PDF on the desktop before scanning.")
+            return self._prepare_manual_alert_locked(observation)
+
+    def _prepare_manual_alert_locked(self, observation: ScanObservation) -> dict[str, Any]:
+        observation = self._with_learned_carrier(observation)
+        options = list(observation.reliable_barcode_trackings)
+        if not options:
+            # UPC/EAN values are normally excluded from new alerts, but an exact
+            # audit tracking match is safe and useful.
+            options = [
+                tracking
+                for tracking in observation.barcode_trackings
+                if tracking in self._matcher.tracking_index
+            ]
+        options = list(dict.fromkeys(options))
+        if not options:
+            raise ValueError("No clear tracking barcode was found. Move closer and scan again.")
+
+        scan_id = secrets.token_hex(8)
+        known = [tracking for tracking in options if tracking in self._matcher.tracking_index]
+        preview_tracking = known[0] if len(known) == 1 else options[0] if len(options) == 1 else ""
+        records = self._matcher.tracking_index.get(preview_tracking, ())
+        candidates = tuple(self._matcher._candidate(record, preview_tracking) for record in records)
+        decision = ScanDecision(
+            status="alert_ready",
+            confidence=1.0 if records else 0.8,
+            message=(
+                "Tracking is ready. Choose the package location."
+                if len(options) == 1
+                else "More than one tracking barcode was read. Choose the one to place in the alert."
+            ),
+            candidates=candidates,
+            tracking=preview_tracking,
+            unit=records[0].unit if len(records) == 1 else "",
+            location=records[0].location if len(records) == 1 else "",
+            carrier=observation.carrier,
+            scan_key=observation.scan_key,
+            related_item_ids=tuple(record.item_id for record in records),
+            scanned_units=observation.unit_candidates,
+            unit_status=("operator_alert" if observation.unit_scan_attempted else "not_attempted"),
+        )
+        self._scans[scan_id] = _StoredScan(scan_id, observation, decision, time.monotonic())
+        self._prune_scans()
+        response = self._response(self._scans[scan_id])
+        response["tracking_options"] = options
+        return response
+
+    def _with_learned_carrier(self, observation: ScanObservation) -> ScanObservation:
+        guess = classify_carrier(
+            observation.barcode_trackings,
+            observation.barcode_tracking_formats,
+            self._learning_model,
+        )
+        return replace(
+            observation,
+            carrier=guess.carrier if guess.carrier != "PKG" else observation.carrier,
+        )
+
+    def save_manual_alert(
+        self,
+        scan_id: str,
+        tracking: str,
+        location: str,
+    ) -> dict[str, Any]:
+        """Save a prepared phone alert after the operator chooses tracking and location."""
+        with self._lock:
+            normalized_location = normalize_location(location)
+            if normalized_location == "CG":
+                normalized_location = "CAGE"
+            if normalized_location not in {normalize_location(value) for value in LOCATIONS}:
+                raise ValueError("Choose a package location from the phone list.")
+            return self._create_manual_alert_locked(scan_id, tracking, normalized_location)
+
+    def _create_manual_alert_locked(
+        self,
+        scan_id: str,
+        tracking: str,
+        normalized_location: str,
+    ) -> dict[str, Any]:
+        stored = self._require_scan(scan_id)
+        if stored.decision.status != "alert_ready" or stored.flagged:
+            raise ValueError("This alert scan is no longer available. Scan the package again.")
+        options = set(stored.observation.reliable_barcode_trackings)
+        options.update(
+            value for value in stored.observation.barcode_trackings if value in self._matcher.tracking_index
+        )
+        if tracking not in options:
+            raise ValueError("Choose a tracking barcode read from this label.")
+
+        records = self._matcher.tracking_index.get(tracking, ())
+        candidates = tuple(self._matcher._candidate(record, tracking) for record in records)
+
+        decision = ScanDecision(
+            status="manual_alert",
+            confidence=1.0 if records else 0.8,
+            message="Package alert saved for end-of-audit review.",
+            candidates=candidates,
+            tracking=tracking,
+            unit=records[0].unit if len(records) == 1 else "",
+            location=normalized_location,
+            carrier=stored.observation.carrier,
+            scan_key=stored.observation.scan_key,
+            related_item_ids=tuple(record.item_id for record in records),
+            scanned_units=stored.observation.unit_candidates,
+            unit_status=("operator_alert" if stored.observation.unit_scan_attempted else "not_attempted"),
+        )
+        stored.decision = decision
+        stored.flagged = True
+        self._actions.put(
+            ScannerAction(
+                scan_id,
+                "manual_alert",
+                stored.observation,
+                decision,
                 location=normalized_location,
-                carrier=matched.carrier,
-                scan_key=observation.scan_key,
-                related_item_ids=matched.related_item_ids,
-                scanned_units=observation.unit_candidates,
-                unit_status=("operator_alert" if observation.unit_scan_attempted else "not_attempted"),
             )
-            stored = _StoredScan(scan_id, observation, decision, time.monotonic(), flagged=True)
-            self._scans[scan_id] = stored
-            self._actions.put(
-                ScannerAction(
-                    scan_id,
-                    "manual_alert",
-                    observation,
-                    decision,
-                    location=normalized_location,
-                )
-            )
-            self._prune_scans()
-            return self._response(stored)
+        )
+        self._prune_scans()
+        return self._response(stored)
 
     def _require_generation(self, expected_generation: int | None) -> None:
         if expected_generation is not None and expected_generation != self._generation:
@@ -328,24 +446,38 @@ class ScannerCoordinator:
         removals = {stored.scan_id: stored for stored in (*expired, *oldest)}
         for stored in removals.values():
             self._scans.pop(stored.scan_id, None)
-            self._scan_ids_by_key.pop(stored.observation.scan_key, None)
+            self._forget_scan_key(stored)
+
+    def _forget_scan_key(self, stored: _StoredScan) -> None:
+        key = stored.observation.scan_key
+        if self._scan_ids_by_key.get(key) == stored.scan_id:
+            self._scan_ids_by_key.pop(key, None)
 
     @staticmethod
     def _can_mark_not_found(stored: _StoredScan) -> bool:
-        return stored.decision.status == "not_found" and not stored.rejected and not stored.flagged
+        return (
+            stored.decision.status == "not_found"
+            and not stored.rejected
+            and not stored.flagged
+            and not stored.undo_queued
+        )
 
     @staticmethod
     def _can_undo(stored: _StoredScan) -> bool:
-        return not stored.undo_queued and (
-            stored.flagged
-            or stored.decision.status
-            in {
-                "matched",
-                "not_found",
-                "duplicate",
-                "unit_mismatch",
-                "unit_not_read",
-            }
+        return (
+            not stored.undo_queued
+            and not stored.rejected
+            and (
+                stored.flagged
+                or stored.decision.status
+                in {
+                    "matched",
+                    "not_found",
+                    "duplicate",
+                    "unit_mismatch",
+                    "unit_not_read",
+                }
+            )
         )
 
     @classmethod
@@ -367,6 +499,8 @@ class ScannerCoordinator:
             stored = self._require_scan(scan_id)
             if stored.undo_queued:
                 raise ValueError("This scan was undone. Scan the label again before choosing a package.")
+            if stored.rejected:
+                raise ValueError("This scan was rejected. Scan the label again before choosing a package.")
             if stored.flagged:
                 raise ValueError("This scan was flagged for review. Scan the package again to confirm it.")
             if stored.decision.status == "matched":
@@ -431,7 +565,7 @@ class ScannerCoordinator:
                     message="The suggestion was already rejected.",
                 )
                 return response
-            self._scan_ids_by_key.pop(stored.observation.scan_key, None)
+            self._forget_scan_key(stored)
             stored.rejected = True
             stored.undo_queued = False
             self._actions.put(ScannerAction(scan_id, "reject", stored.observation, stored.decision))
@@ -445,6 +579,8 @@ class ScannerCoordinator:
     def mark_not_found(self, scan_id: str) -> dict[str, Any]:
         with self._lock:
             stored = self._require_scan(scan_id)
+            if stored.undo_queued:
+                raise ValueError("This scan was undone. Scan the label again before flagging it.")
             if stored.decision.status == "not_found" and not stored.rejected:
                 if stored.flagged:
                     return self._response(stored, repeated=True)
@@ -457,6 +593,8 @@ class ScannerCoordinator:
         """Flag a known tracking whose unit does not match the physical label."""
         with self._lock:
             stored = self._require_scan(scan_id)
+            if stored.undo_queued:
+                raise ValueError("This scan was undone. Scan the label again before flagging it.")
             if stored.decision.status in {"confirm", "unit_not_read"} and not stored.rejected:
                 if stored.flagged:
                     return self._response(stored, repeated=True)
@@ -478,7 +616,7 @@ class ScannerCoordinator:
                 }
             if not self._can_undo(stored):
                 raise ValueError("This scan did not change desktop audit data, so there is nothing to undo.")
-            self._scan_ids_by_key.pop(stored.observation.scan_key, None)
+            self._forget_scan_key(stored)
             stored.undo_queued = True
             self._actions.put(ScannerAction(scan_id, "undo", stored.observation, stored.decision))
             return {
@@ -490,6 +628,7 @@ class ScannerCoordinator:
             }
 
     def _require_scan(self, scan_id: str) -> _StoredScan:
+        self._prune_scans()
         stored = self._scans.get(scan_id)
         if stored is None:
             raise KeyError("The scan has expired. Scan the label again.")
@@ -497,12 +636,21 @@ class ScannerCoordinator:
 
     def drain_actions(self, limit: int = 100) -> list[ScannerAction]:
         actions: list[ScannerAction] = []
-        while len(actions) < limit:
-            try:
-                actions.append(self._actions.get_nowait())
-            except queue.Empty:
-                break
+        with self._lock:
+            while len(actions) < limit:
+                if self._retry_actions:
+                    actions.append(self._retry_actions.popleft())
+                    continue
+                try:
+                    actions.append(self._actions.get_nowait())
+                except queue.Empty:
+                    break
         return actions
+
+    def retry_actions(self, actions: list[ScannerAction]) -> None:
+        """Preserve uncommitted work ahead of subsequent phone requests."""
+        with self._lock:
+            self._retry_actions.extendleft(reversed(actions))
 
 
 _PAIR_TEMPLATE = """
@@ -511,9 +659,7 @@ _PAIR_TEMPLATE = """
 <title>Pair Package Scanner</title><style>
 :root{color-scheme:light;font-family:ui-rounded,"SF Pro Rounded",system-ui,sans-serif;background:#eef2f4;color:#17212b}
 *{box-sizing:border-box}body{margin:0;min-height:100svh;display:grid;place-items:center;padding:20px}.panel{width:min(440px,100%);background:white;border:1px solid #d9dee5;border-radius:14px;padding:26px;box-shadow:0 10px 30px #1a2b2520}h1{font-size:25px;margin:0 0 8px}p{color:#5a6572;line-height:1.45;margin:0 0 20px}label{display:block;font-size:14px;font-weight:700;margin-bottom:8px}input{width:100%;font-size:28px;letter-spacing:8px;text-align:center;padding:14px;border:2px solid #aeb7c2;border-radius:9px}input:focus{border-color:#176b4d;outline:3px solid #176b4d22}button{width:100%;min-height:50px;margin-top:13px;padding:14px;border:0;border-radius:9px;background:#176b4d;color:white;font-size:17px;font-weight:750}.error{color:#b42318;background:#fff3f1;border-radius:8px;margin-top:14px;padding:11px}.privacy{font-size:12px;margin:16px 0 0;text-align:center}
-</style></head><body><main class="panel"><h1>Pair package scanner</h1><p>{{ connection_help }}</p><form method="post" action="/pair"><label for="pair-code">Pairing code</label><input id="pair-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" value="{{ code }}" autofocus required><button type="submit">Connect to desktop</button></form>{% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}<p class="privacy">{{ privacy_message }}</p></main><script>
-const fragment=new URLSearchParams(window.location.hash.slice(1));const fragmentCode=fragment.get('pair');const pairInput=document.getElementById('pair-code');if(fragmentCode&&/^[0-9]{6}$/.test(fragmentCode)){pairInput.value=fragmentCode;history.replaceState(null,'',window.location.pathname)}
-</script></body></html>
+</style></head><body><main class="panel"><h1>Pair package scanner</h1><p>{{ connection_help }}</p><form method="post" action="/pair"><label for="pair-code">Pairing code</label><input id="pair-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" value="{{ code }}" autofocus required><button type="submit">Connect to desktop</button></form>{% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}<p class="privacy">{{ privacy_message }}</p></main></body></html>
 """
 
 _SCANNER_TEMPLATE = """
@@ -574,7 +720,7 @@ async function runLiveScan(){if(!liveActive||livePaused||liveRequestBusy||!deskt
 async function startLiveScanner(){if(liveUnavailable){cameraInput.click();return}if(requestBusy||!desktopOnline)return;resultBox.classList.remove('show');setBusy(true,'Opening live camera…');try{liveStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}});liveVideo.srcObject=liveStream;await liveVideo.play();nativeDetector=await makeNativeDetector();nativeDetectorFailures=0;nativeEmptyFrames=0;liveActive=true;livePaused=false;liveView.classList.add('show');setLiveLabel('Point the guide at one tracking barcode');scheduleLiveScan(100)}catch(_error){stopLiveScanner();liveUnavailable=true;liveFailure='Live camera access was blocked. Tap Scan package again for the phone camera-photo fallback, or allow camera access and reload this page.';renderCapabilityNotice()}finally{setBusy(false)}}
 function stopLiveScanner(){clearTimeout(liveTimer);liveTimer=null;liveActive=false;livePaused=false;liveRequestBusy=false;if(liveStream)liveStream.getTracks().forEach(track=>track.stop());liveStream=null;liveVideo.srcObject=null;liveView.classList.remove('show');updateControls()}
 function resumeLiveScanner(){const previousTracking=normalizedTracking(current?.tracking);if(previousTracking){awaitingClearTracking=previousTracking;clearFrames=0}current=null;resultBox.classList.remove('show');if(!liveActive){startLiveScanner();return}livePaused=false;setLiveLabel(awaitingClearTracking?'Move to the next package':'Point the guide at one tracking barcode');scheduleLiveScan(100)}
-cameraButton.addEventListener('click',()=>liveActive?stopLiveScanner():startLiveScanner());libraryButton.addEventListener('click',()=>libraryInput.click());cameraInput.addEventListener('change',event=>{if(event.target.files[0])scan(event.target.files[0])});libraryInput.addEventListener('change',event=>{if(event.target.files[0])scan(event.target.files[0])});window.addEventListener('online',refresh);window.addEventListener('offline',()=>setConnection(false,'Phone is offline. Reconnect to the internet or Wi-Fi and retry.'));window.addEventListener('pagehide',stopLiveScanner);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){refresh();scheduleLiveScan(100)}});renderCapabilityNotice();refresh();setInterval(refresh,5000);
+cameraButton.addEventListener('click',()=>liveActive?stopLiveScanner():startLiveScanner());libraryButton.addEventListener('click',()=>libraryInput.click());cameraInput.addEventListener('change',event=>{if(event.target.files[0])scan(event.target.files[0])});libraryInput.addEventListener('change',event=>{if(event.target.files[0])scan(event.target.files[0])});window.addEventListener('online',refresh);window.addEventListener('offline',()=>setConnection(false,'Phone is offline. Reconnect to the same Wi-Fi as the desktop and retry.'));window.addEventListener('pagehide',stopLiveScanner);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){refresh();scheduleLiveScan(100)}});renderCapabilityNotice();refresh();setInterval(refresh,5000);
 </script></body></html>
 """
 
@@ -607,8 +753,6 @@ def create_scanner_app(
     pairing_code: str,
     secret_key: str,
     pairing_expires_at: float | None = None,
-    *,
-    remote: bool = False,
 ) -> Flask:
     app = Flask(__name__)
     app.secret_key = secret_key
@@ -616,7 +760,6 @@ def create_scanner_app(
         MAX_CONTENT_LENGTH=MAX_IMAGE_BYTES,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict",
-        SESSION_COOKIE_SECURE=remote,
     )
     attempts: dict[str, deque[float]] = {}
     global_attempts: deque[float] = deque()
@@ -661,29 +804,15 @@ def create_scanner_app(
             abort(403)
 
     def render_pair(*, code: str = "", error: str = ""):
-        if remote:
-            connection_help = (
-                "Enter the temporary six-digit code shown on the desktop. "
-                "This secure remote connection works across public Wi-Fi and VPNs."
-            )
-            privacy_message = (
-                "Decoded tracking values or small camera crops travel through Cloudflare over HTTPS, "
-                "are processed on the desktop, and are not saved by Package Audit."
-            )
-        else:
-            connection_help = (
-                "Enter the temporary six-digit code shown on the desktop. "
-                "Both devices must be on the same trusted Wi-Fi."
-            )
-            privacy_message = (
-                "Tracking values and camera images are processed on the desktop and are not saved."
-            )
         return render_template_string(
             _PAIR_TEMPLATE,
             code=code,
             error=error,
-            connection_help=connection_help,
-            privacy_message=privacy_message,
+            connection_help=(
+                "Enter the temporary six-digit code shown on the desktop. "
+                "Both devices must be on the same trusted Wi-Fi."
+            ),
+            privacy_message="Tracking values and camera images are processed on the desktop and are not saved.",
         )
 
     @app.get("/")
@@ -694,7 +823,7 @@ def create_scanner_app(
 
     @app.post("/pair")
     def pair():
-        remote = request.remote_addr or "unknown"
+        client_address = request.remote_addr or "unknown"
         now = time.monotonic()
         if now > pairing_expires_at:
             return render_pair(
@@ -708,7 +837,7 @@ def create_scanner_app(
                     attempts.pop(address, None)
             while global_attempts and now - global_attempts[0] > 60:
                 global_attempts.popleft()
-            recent = attempts.setdefault(remote, deque())
+            recent = attempts.setdefault(client_address, deque())
             if len(recent) >= 8 or len(global_attempts) >= 30:
                 return render_pair(error="Try again in one minute."), 429
             recent.append(now)
@@ -759,15 +888,10 @@ def create_scanner_app(
     @app.get("/scanner")
     def scanner():
         require_paired()
-        privacy = (
-            "Tracking-only lookup · encrypted Cloudflare route to your desktop"
-            if remote
-            else "Tracking-only lookup · paired directly with your desktop"
-        )
         return render_template_string(
             _SCANNER_TEMPLATE,
             csrf=session["csrf"],
-            scanner_privacy=privacy,
+            scanner_privacy="Tracking-only lookup · paired directly with your desktop",
         )
 
     @app.get("/api/status")
@@ -804,6 +928,8 @@ def create_scanner_app(
     def live_trackings():
         require_csrf()
         payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify(error="Send a JSON object."), 400
         raw_barcodes = payload.get("barcodes")
         raw_formats = payload.get("formats", [])
         if not isinstance(raw_barcodes, list) or not 1 <= len(raw_barcodes) <= MAX_LIVE_BARCODES:
@@ -852,6 +978,8 @@ def create_scanner_app(
     def confirm(scan_id: str):
         require_csrf()
         payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify(error="Send a JSON object."), 400
         try:
             return jsonify(coordinator.confirm(scan_id, str(payload.get("item_id", ""))))
         except (KeyError, ValueError) as exc:
@@ -913,27 +1041,16 @@ def create_scanner_app(
 
 
 class ScannerServer:
-    """Background scanner server using either a LAN or temporary HTTPS address."""
+    """Background scanner server for phones on the same trusted local network."""
 
-    def __init__(
-        self,
-        coordinator: ScannerCoordinator,
-        *,
-        remote: bool = False,
-        tunnel_factory=CloudflareQuickTunnel,
-    ) -> None:
+    def __init__(self, coordinator: ScannerCoordinator) -> None:
         self.coordinator = coordinator
-        self.remote = remote
         self.pairing_code: str
         self._secret_key: str
         self._pairing_expires_at: float
         self._server: BaseWSGIServer | None = None
         self._thread: threading.Thread | None = None
-        self._app: Flask | None = None
-        self._tunnel_factory = tunnel_factory
-        self._tunnel: CloudflareQuickTunnel | None = None
-        self._public_url: str | None = None
-        self.host_address = "127.0.0.1" if remote else local_ip_address()
+        self.host_address = local_ip_address()
         self._renew_pairing()
 
     def _renew_pairing(self) -> None:
@@ -943,12 +1060,7 @@ class ScannerServer:
 
     @property
     def running(self) -> bool:
-        local_running = bool(self._thread and self._thread.is_alive())
-        return local_running and (not self.remote or self.tunnel_running)
-
-    @property
-    def tunnel_running(self) -> bool:
-        return bool(self._tunnel and self._tunnel.running)
+        return bool(self._thread and self._thread.is_alive())
 
     @property
     def port(self) -> int:
@@ -956,12 +1068,6 @@ class ScannerServer:
 
     @property
     def url(self) -> str:
-        if self.remote:
-            if not self._public_url:
-                raise RuntimeError("The remote scanner tunnel has not started.")
-            # The fragment is filled into the pairing form by the browser and
-            # is never sent to Cloudflare in the initial HTTP request.
-            return f"{self._public_url}/#pair={self.pairing_code}"
         return f"http://{self.host_address}:{self.port}/?pair={self.pairing_code}"
 
     @property
@@ -974,22 +1080,19 @@ class ScannerServer:
         if self._server:
             self.stop()
         self._renew_pairing()
-        self._app = create_scanner_app(
+        web_app = create_scanner_app(
             self.coordinator,
             self.pairing_code,
             self._secret_key,
             self._pairing_expires_at,
-            remote=self.remote,
         )
-        # LAN mode accepts private-network traffic. Remote mode binds only to
-        # loopback so the origin is reachable exclusively through cloudflared.
         # LAN binding is intentional and guarded by local_network_only().
-        bind_address = "127.0.0.1" if self.remote else str(ipaddress.IPv4Address(0))
+        bind_address = str(ipaddress.IPv4Address(0))
         try:
             self._server = make_server(
                 bind_address,
                 0,
-                self._app,
+                web_app,
                 threaded=True,
                 request_handler=_QuietRequestHandler,
             )
@@ -998,45 +1101,13 @@ class ScannerServer:
             # must surface that as an ordinary startup error instead of
             # unexpectedly terminating the entire desktop process.
             self._server = None
-            port_kind = "loopback" if self.remote else "local network"
-            raise OSError(f"Could not open a {port_kind} port for the phone scanner.") from exc
+            raise OSError("Could not open a local network port for the phone scanner.") from exc
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="package-scanner", daemon=True
         )
         self._thread.start()
-        if self.remote:
-            try:
-                last_tunnel_error: TunnelStartupError | None = None
-                for _attempt in range(2):
-                    self._tunnel = self._tunnel_factory()
-                    try:
-                        self._public_url = self._tunnel.start(f"http://127.0.0.1:{self.port}")
-                        break
-                    except TunnelStartupError as exc:
-                        last_tunnel_error = exc
-                        self._tunnel.stop()
-                        self._tunnel = None
-                if not self._public_url:
-                    if last_tunnel_error:
-                        raise last_tunnel_error
-                    raise TunnelStartupError("cloudflared did not provide a remote scanner address.")
-                public_host = urlparse(self._public_url).hostname
-                if public_host:
-                    self._app.config["TRUSTED_HOSTS"] = [
-                        public_host,
-                        "127.0.0.1",
-                        "localhost",
-                    ]
-            except Exception:
-                self.stop()
-                raise
 
     def stop(self) -> None:
-        tunnel = self._tunnel
-        self._tunnel = None
-        self._public_url = None
-        if tunnel:
-            tunnel.stop()
         server, thread = self._server, self._thread
         self._server = None
         self._thread = None
@@ -1052,4 +1123,3 @@ class ScannerServer:
                     pass
         if thread and thread is not threading.current_thread():
             thread.join(timeout=3)
-        self._app = None

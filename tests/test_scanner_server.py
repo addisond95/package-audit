@@ -13,7 +13,6 @@ import app.scanner_server as scanner_server
 from app.models import AuditEntry
 from app.scanner_matching import ScanObservation
 from app.scanner_server import ScannerCoordinator, ScannerServer, create_scanner_app
-from app.scanner_tunnel import TunnelStartupError
 
 
 def _entry(
@@ -60,6 +59,62 @@ def test_exact_scan_waits_for_confirmation_and_repeats_idempotently(entries):
     assert repeated["scan_id"] == first["scan_id"]
     assert repeated["repeated"] is True
     assert coordinator.drain_actions() == []
+
+
+def test_rejected_scan_cannot_be_confirmed(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    scan = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    coordinator.reject(scan["scan_id"])
+    coordinator.drain_actions()
+    with pytest.raises(ValueError, match="rejected"):
+        coordinator.confirm(scan["scan_id"], "one")
+    assert coordinator.drain_actions() == []
+
+
+def test_desktop_changes_are_reflected_in_a_fresh_scan(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    observation = ScanObservation(barcodes=("1Z999AA10123456784",))
+    first = coordinator.process_observation(observation)
+    entries[0].audited = True
+    coordinator.configure("hash", entries)
+    second = coordinator.process_observation(observation)
+    assert second["scan_id"] != first["scan_id"]
+    assert second["status"] == "already_matched"
+    entries[0].audited = False
+    coordinator.configure("hash", entries)
+    assert coordinator.process_observation(observation)["status"] == "confirm"
+
+
+def test_expired_scan_cannot_be_confirmed_without_a_status_poll(entries, monkeypatch):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    scan = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123456784",)))
+    monkeypatch.setattr(scanner_server.time, "monotonic", lambda: time.time() + 3600)
+    with pytest.raises(KeyError, match="expired"):
+        coordinator.confirm(scan["scan_id"], "one")
+
+
+def test_pruning_old_rejected_scan_keeps_new_scan_cache(entries, monkeypatch):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    observation = ScanObservation(barcodes=("1Z999AA10123456784",))
+    old = coordinator.process_observation(observation)
+    coordinator.reject(old["scan_id"])
+    current = coordinator.process_observation(observation)
+    coordinator._scans[old["scan_id"]].created_at -= scanner_server.SCAN_CACHE_TTL_SECONDS + 1
+    coordinator.status()
+    assert coordinator.process_observation(observation)["scan_id"] == current["scan_id"]
+
+
+def test_undone_alert_cannot_be_flagged_again(entries):
+    coordinator = ScannerCoordinator()
+    coordinator.configure("hash", entries)
+    scan = coordinator.process_observation(ScanObservation(barcodes=("1Z999AA10123459999",)))
+    coordinator.undo(scan["scan_id"])
+    with pytest.raises(ValueError, match="undone"):
+        coordinator.mark_not_found(scan["scan_id"])
 
 
 def test_confirmation_queues_match_and_replay_is_idempotent(entries):
@@ -315,26 +370,6 @@ def test_pairing_page_escapes_prefill_and_sets_private_headers(entries):
     assert response.headers["X-Frame-Options"] == "DENY"
     assert response.headers["Permissions-Policy"] == "camera=(self), microphone=()"
     assert "default-src 'self'" in response.headers["Content-Security-Policy"]
-
-
-def test_remote_pairing_uses_secure_cookie_and_fragment_prefill(entries):
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    app = create_scanner_app(coordinator, "123456", "secret", remote=True)
-    app.config["TESTING"] = True
-    client = app.test_client()
-
-    landing = client.get("/", base_url="https://quiet-box.trycloudflare.com")
-    paired = client.post(
-        "/pair",
-        data={"code": "123456"},
-        base_url="https://quiet-box.trycloudflare.com",
-    )
-
-    assert b"public Wi-Fi and VPNs" in landing.data
-    assert b"window.location.hash" in landing.data
-    assert paired.status_code == 302
-    assert "Secure" in paired.headers["Set-Cookie"]
 
 
 def test_http_pairing_rate_limits_and_expires(entries):
@@ -646,99 +681,6 @@ def test_background_server_starts_and_stops(entries):
         server.stop()
         server.stop()
     assert not server.running
-
-
-def test_remote_server_uses_loopback_and_closes_tunnel(entries):
-    class FakeTunnel:
-        def __init__(self):
-            self.running = False
-            self.local_url = ""
-            self.stopped = False
-
-        def start(self, local_url):
-            self.local_url = local_url
-            self.running = True
-            return "https://quiet-box.trycloudflare.com"
-
-        def stop(self):
-            self.running = False
-            self.stopped = True
-
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    tunnel = FakeTunnel()
-    server = ScannerServer(coordinator, remote=True, tunnel_factory=lambda: tunnel)
-
-    server.start()
-    try:
-        assert server.running
-        assert server.host_address == "127.0.0.1"
-        assert tunnel.local_url == f"http://127.0.0.1:{server.port}"
-        assert server.url == "https://quiet-box.trycloudflare.com/#pair=" + server.pairing_code
-        assert "?pair=" not in server.url
-        with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/", timeout=3) as response:
-            assert response.status == 200
-    finally:
-        server.stop()
-
-    assert tunnel.stopped
-    assert not server.running
-
-
-def test_remote_tunnel_failure_closes_local_server(entries):
-    class FailingTunnel:
-        running = False
-
-        def start(self, _local_url):
-            raise OSError("tunnel unavailable")
-
-        def stop(self):
-            pass
-
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    server = ScannerServer(coordinator, remote=True, tunnel_factory=FailingTunnel)
-
-    with pytest.raises(OSError, match="tunnel unavailable"):
-        server.start()
-
-    assert not server.running
-    assert server.port == 0
-
-
-def test_remote_server_retries_one_failed_quick_tunnel(entries):
-    class Tunnel:
-        def __init__(self, url=""):
-            self.url = url
-            self.running = False
-            self.stopped = False
-
-        def start(self, _local_url):
-            if not self.url:
-                raise TunnelStartupError("temporary hostname unavailable")
-            self.running = True
-            return self.url
-
-        def stop(self):
-            self.running = False
-            self.stopped = True
-
-    coordinator = ScannerCoordinator()
-    coordinator.configure("hash", entries)
-    first = Tunnel()
-    second = Tunnel("https://second-box.trycloudflare.com")
-    tunnels = iter((first, second))
-    server = ScannerServer(coordinator, remote=True, tunnel_factory=lambda: next(tunnels))
-
-    server.start()
-    try:
-        assert server.running
-        assert server.url.startswith("https://second-box.trycloudflare.com/")
-        assert first.stopped
-    finally:
-        server.stop()
-
-    assert second.stopped
 
 
 def test_background_server_reports_bind_exit_as_oserror(entries, monkeypatch):

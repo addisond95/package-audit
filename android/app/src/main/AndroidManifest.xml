@@ -15,6 +15,9 @@
         android:dataExtractionRules="@xml/data_extraction_rules" android:icon="@drawable/ic_scanner"
         android:usesCleartextTraffic="false" android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:supportsRtl="true">
+        <provider android:name="ai.onnxruntime.TelemetryInitializer"
+            android:authorities="${applicationId}.onnxruntime_telemetry_initializer"
+            tools:node="remove" />
         <activity android:name=".MainActivity" android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>

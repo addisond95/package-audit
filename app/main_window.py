@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from app.audit_dialogs import AlertResolutionDialog, AuditAreaChecklistDialog, AuditNoteRulesDialog
 from app.audit_report import write_audit_report
+from app.audit_workflow import canonical_audit_entries
 from app.bluetooth_scanner import BluetoothPairingDialog, BluetoothScanner
 from app.constants import (
     APP_DIR,
@@ -55,6 +57,8 @@ from app.delegates import ComboBoxDelegate
 from app.diagnostics import LOGGER_NAME, configure_diagnostics, install_exception_hooks
 from app.export_pdf import write_highlighted_pdf
 from app.export_utils import atomic_output_path, spreadsheet_safe_cell
+from app.label_annotation import LabelAnnotationDialog
+from app.label_training import TrainingDataset
 from app.models import (
     AuditEntry,
     DoubleLoggedPackage,
@@ -98,6 +102,8 @@ DOUBLE_COLUMNS = len(DOUBLE_HEADERS)
 #: after the user re-sorts the table by clicking a header.
 ENTRY_INDEX_ROLE = Qt.UserRole
 ALERT_KEY_ROLE = Qt.UserRole + 1
+SHIFT_NOTE_ID_ROLE = Qt.UserRole + 2
+TRAINING_SAMPLE_ID_ROLE = Qt.UserRole + 3
 
 ALERT_COLORS = {
     "error": QColor(242, 95, 92, 95),
@@ -129,6 +135,7 @@ class PackageAuditApp(QMainWindow):
             # Permission bits are not consistently supported on Windows.
             pass
         self.db = AuditDatabase(APP_DIR / DB_FILENAME)
+        self.training_dataset = TrainingDataset(APP_DIR / "training_data")
 
         self.pdf_path: Path | None = None
         self.pdf_hash: str | None = None
@@ -194,6 +201,8 @@ class PackageAuditApp(QMainWindow):
         self.tabs.addTab(self._build_errors_tab(), "Package Errors")
         self.tabs.addTab(self._build_double_logged_tab(), "Double Logged")
         self.tabs.addTab(self._build_alerts_tab(), "Alerts")
+        self.tabs.addTab(self._build_shift_notes_tab(), "Shift Notes")
+        self.tabs.addTab(self._build_training_data_tab(), "Training Data")
         layout.addWidget(self.tabs, stretch=1)
 
         self._with_table_loading(
@@ -241,9 +250,6 @@ class PackageAuditApp(QMainWindow):
         self._add_button(toolbar, "Export Highlighted PDF", self.export_highlighted_pdf)
         self._add_button(toolbar, "Highlight Color", self.choose_color)
         self.scanner_button = self._add_button(toolbar, "Local Phone Scanner", self.start_phone_scanner)
-        self.remote_scanner_button = self._add_button(
-            toolbar, "Remote Phone Scanner", self.start_remote_phone_scanner
-        )
         toolbar.addWidget(self._make_vline())
         self._add_button(toolbar, "Clear Current Audit", self.clear_current_audit, "danger")
         self._add_button(toolbar, "Clear Manual Sections", self.clear_manual_sections, "danger")
@@ -429,6 +435,212 @@ class PackageAuditApp(QMainWindow):
         self._refresh_error_templates()
         return tab
 
+    def _build_shift_notes_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        help_label = QLabel(
+            "Add notes as the shift happens. Each note is saved immediately with the current time "
+            "and included in the Audit TXT export."
+        )
+        help_label.setWordWrap(True)
+        self.shift_note_input = QPlainTextEdit()
+        self.shift_note_input.setPlaceholderText("Type a shift note…")
+        self.shift_note_input.setMaximumHeight(100)
+
+        buttons = QHBoxLayout()
+        self._add_button(buttons, "Add Timestamped Note", self.add_shift_note, "primary")
+        self._add_button(buttons, "Delete Selected Notes", self.delete_selected_shift_notes, "danger")
+        buttons.addStretch(1)
+
+        self.shift_notes_table = QTableWidget(0, 2)
+        self.shift_notes_table.setHorizontalHeaderLabels(["Time", "Note"])
+        self.shift_notes_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.shift_notes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.shift_notes_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.shift_notes_table.setAlternatingRowColors(True)
+        self.shift_notes_table.verticalHeader().setVisible(False)
+        self.shift_notes_table.setColumnWidth(0, 170)
+        self.shift_notes_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+
+        layout.addWidget(help_label)
+        layout.addWidget(self.shift_note_input)
+        layout.addLayout(buttons)
+        layout.addWidget(self.shift_notes_table)
+        return tab
+
+    def _build_training_data_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        explanation = QLabel(
+            "Only explicitly selected phone examples appear here. Label photos are encrypted locally and "
+            "remain Pending until reviewed. Confirm + training can send a selected label directly from the "
+            "phone; routine audit scans still save no images."
+        )
+        explanation.setWordWrap(True)
+        buttons = QHBoxLayout()
+        self._add_button(buttons, "Import Phone Examples", self.import_training_samples, "primary")
+        self._add_button(buttons, "Review / Annotate Selected", self.review_selected_training_sample)
+        self._add_button(buttons, "Freeze Dataset Version", self.create_training_dataset_version)
+        self._add_button(buttons, "Delete Selected Examples", self.delete_selected_training_samples, "danger")
+        buttons.addStretch(1)
+        self.training_table = QTableWidget(0, 6)
+        self.training_table.setHorizontalHeaderLabels(
+            ["Captured", "Outcome", "Carrier", "Review", "Dataset Split", "Sample ID"]
+        )
+        self.training_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.training_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.training_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.training_table.setAlternatingRowColors(True)
+        self.training_table.verticalHeader().setVisible(False)
+        for column, width in enumerate((170, 150, 90, 90, 100, 260)):
+            self.training_table.setColumnWidth(column, width)
+        self.training_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.training_table.doubleClicked.connect(lambda _index: self.review_selected_training_sample())
+        layout.addWidget(explanation)
+        layout.addLayout(buttons)
+        layout.addWidget(self.training_table)
+        self._refresh_training_samples()
+        return tab
+
+    def import_training_samples(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Import opt-in phone training examples",
+            "",
+            "Package Audit Samples (*.pasample)",
+        )
+        if not paths:
+            return
+        imported = 0
+        failures: list[str] = []
+        for path_str in paths:
+            path = Path(path_str)
+            try:
+                self.training_dataset.import_bundle(path.read_bytes())
+                imported += 1
+            except (OSError, ValueError) as exc:
+                failures.append(f"{path.name}: {exc}")
+        self._refresh_training_samples()
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Some examples were not imported",
+                f"Imported {imported} example(s).\n\n" + "\n".join(failures[:10]),
+            )
+        else:
+            self.statusBar().showMessage(f"Imported {imported} encrypted training example(s).", 5000)
+
+    def delete_selected_training_samples(self) -> None:
+        sample_ids = {
+            marker.data(TRAINING_SAMPLE_ID_ROLE)
+            for row in {index.row() for index in self.training_table.selectedIndexes()}
+            if (marker := self.training_table.item(row, 0)) is not None
+        }
+        if not sample_ids or not self._confirm(
+            "Delete training examples?",
+            f"Permanently delete {len(sample_ids)} encrypted diagnostic example(s)?",
+        ):
+            return
+        for sample_id in sample_ids:
+            if isinstance(sample_id, str):
+                self.training_dataset.delete_sample(sample_id)
+        self._refresh_training_samples()
+
+    def _selected_training_sample_ids(self) -> list[str]:
+        return [
+            sample_id
+            for row in sorted({index.row() for index in self.training_table.selectedIndexes()})
+            if (marker := self.training_table.item(row, 0)) is not None
+            and isinstance(sample_id := marker.data(TRAINING_SAMPLE_ID_ROLE), str)
+        ]
+
+    def review_selected_training_sample(self) -> None:
+        sample_ids = self._selected_training_sample_ids()
+        if len(sample_ids) != 1:
+            QMessageBox.information(
+                self,
+                "Select one example",
+                "Select exactly one training example to review and annotate.",
+            )
+            return
+        sample_id = sample_ids[0]
+        try:
+            sample = self.training_dataset.get_sample(sample_id)
+            image_bytes = self.training_dataset.image_bytes(sample_id)
+            dialog = LabelAnnotationDialog(sample, image_bytes, self)
+        except (KeyError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Could not open example", str(exc))
+            return
+        if dialog.exec() != QDialog.Accepted or not dialog.review_status:
+            return
+        reviewer, accepted = QInputDialog.getText(
+            self,
+            "Reviewer identity",
+            "Reviewer name or staff identifier:",
+            text="local-reviewer",
+        )
+        if not accepted:
+            return
+        try:
+            self.training_dataset.review_sample(
+                sample_id,
+                status=dialog.review_status,
+                annotations=dialog.annotations if dialog.review_status == "approved" else {},
+                reviewer=reviewer,
+                dataset_split=dialog.dataset_split if dialog.review_status == "approved" else "",
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not save review", str(exc))
+            return
+        self._refresh_training_samples()
+        self.statusBar().showMessage(f"Training example {dialog.review_status}.", 5000)
+
+    def create_training_dataset_version(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self,
+            "Freeze dataset version",
+            "Optional version note:",
+        )
+        if not accepted:
+            return
+        try:
+            version = self.training_dataset.create_version(name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Dataset is not ready", str(exc))
+            return
+        counts = version["split_counts"]
+        QMessageBox.information(
+            self,
+            "Dataset version created",
+            f"{version['version_id']}\n\n"
+            f"Train: {counts['train']}\nValidation: {counts['validation']}\nTest: {counts['test']}",
+        )
+
+    def _refresh_training_samples(self) -> None:
+        if not hasattr(self, "training_table"):
+            return
+        samples = self.training_dataset.list_samples()
+        self.training_table.setRowCount(len(samples))
+        for row, sample in enumerate(samples):
+            values = [
+                self._local_timestamp(sample["created_at"]),
+                sample["outcome"].replace("_", " ").title(),
+                sample["carrier"],
+                sample["status"].title(),
+                sample["dataset_split"].title(),
+                sample["sample_id"],
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(TRAINING_SAMPLE_ID_ROLE, sample["sample_id"])
+                self.training_table.setItem(row, column, item)
+
     def _build_shortcuts(self) -> None:
         # Scoped to the audit table so the standard select-all behaviour keeps
         # working inside the search box, paste areas, and cell editors.
@@ -503,6 +715,7 @@ class PackageAuditApp(QMainWindow):
 
         self.source_label.setText(f"{path.name}  •  {len(entries)} packages")
         self._load_manual_rows()
+        self._refresh_shift_notes()
         self._configure_scanner_for_audit()
         self._refresh_table()
         self.statusBar().showMessage(f"Loaded {path.name}", 5000)
@@ -512,6 +725,40 @@ class PackageAuditApp(QMainWindow):
             return
         self._populate_errors_table(self.db.load_package_errors(self.pdf_hash))
         self._populate_double_table(self.db.load_double_logged(self.pdf_hash))
+
+    def add_shift_note(self) -> None:
+        if not self._require_pdf():
+            return
+        text = self.shift_note_input.toPlainText().strip()
+        if not text:
+            self.statusBar().showMessage("Type a shift note first.", 3000)
+            return
+        self.db.add_shift_note(self.pdf_hash, text)
+        self.shift_note_input.clear()
+        self._refresh_shift_notes()
+        self.statusBar().showMessage("Shift note saved with timestamp.", 3000)
+
+    def delete_selected_shift_notes(self) -> None:
+        if not self.pdf_hash:
+            return
+        note_ids = {
+            marker.data(SHIFT_NOTE_ID_ROLE)
+            for row in {index.row() for index in self.shift_notes_table.selectedIndexes()}
+            if (marker := self.shift_notes_table.item(row, 0)) is not None
+        }
+        for note_id in note_ids:
+            if isinstance(note_id, int):
+                self.db.delete_shift_note(self.pdf_hash, note_id)
+        self._refresh_shift_notes()
+
+    def _refresh_shift_notes(self) -> None:
+        notes = self.db.load_shift_notes(self.pdf_hash) if self.pdf_hash else []
+        self.shift_notes_table.setRowCount(len(notes))
+        for row, note in enumerate(notes):
+            timestamp = QTableWidgetItem(self._local_timestamp(note.created_at))
+            timestamp.setData(SHIFT_NOTE_ID_ROLE, note.note_id)
+            self.shift_notes_table.setItem(row, 0, timestamp)
+            self.shift_notes_table.setItem(row, 1, QTableWidgetItem(note.text))
 
     # ----------------------------------------------------------- audit table
     def _refresh_table(self) -> None:
@@ -600,9 +847,11 @@ class PackageAuditApp(QMainWindow):
             return
 
         entry = self.entries[entry_index]
-        entry.audited = not entry.audited
+        audited = not entry.audited
         if self.pdf_hash:
-            self.db.set_state(self.pdf_hash, entry.item_id, entry.audited)
+            self.db.set_state(self.pdf_hash, entry.item_id, audited)
+        entry.audited = audited
+        if self.pdf_hash:
             self.scanner_coordinator.configure(self.pdf_hash, self.entries)
         self._refresh_table()
         self._focus_search_for_next_unit()
@@ -648,10 +897,11 @@ class PackageAuditApp(QMainWindow):
         for entry_index in self.filtered_indices:
             entry = self.entries[entry_index]
             if entry.audited != audited:
-                entry.audited = audited
                 changed_states.append((entry.item_id, audited))
         if changed_states:
             self.db.set_states(self.pdf_hash, changed_states)
+            for entry_index in self.filtered_indices:
+                self.entries[entry_index].audited = audited
             self.scanner_coordinator.configure(self.pdf_hash, self.entries)
             self._refresh_table()
 
@@ -846,7 +1096,11 @@ class PackageAuditApp(QMainWindow):
         self.stop_phone_scanner()
         self.scanner_coordinator.configure(self.pdf_hash, self.entries)
         scanner = BluetoothScanner(
-            self.scanner_coordinator, self._process_scanner_actions, self._bluetooth_save_verified, self
+            self.scanner_coordinator,
+            self._process_scanner_actions,
+            self._bluetooth_save_verified,
+            self._save_bluetooth_training_sample,
+            self,
         )
         scanner.dialog = BluetoothPairingDialog(scanner, self.stop_bluetooth_scanner, self)
         try:
@@ -859,6 +1113,12 @@ class PackageAuditApp(QMainWindow):
         self.bluetooth_scanner = scanner
         self.bluetooth_button.setText("Bluetooth Scanner Info")
         scanner.dialog.show()
+
+    def _save_bluetooth_training_sample(self, image: bytes, metadata: dict) -> dict:
+        """Store a phone-confirmed label in the encrypted pending dataset."""
+        saved = self.training_dataset.add_sample(image, metadata)
+        self._refresh_training_samples()
+        return saved
 
     def stop_bluetooth_scanner(self) -> None:
         scanner = self.bluetooth_scanner
@@ -899,12 +1159,6 @@ class PackageAuditApp(QMainWindow):
         return True
 
     def start_phone_scanner(self) -> None:
-        self._start_phone_scanner(remote=False)
-
-    def start_remote_phone_scanner(self) -> None:
-        self._start_phone_scanner(remote=True)
-
-    def _start_phone_scanner(self, *, remote: bool) -> None:
         self.stop_bluetooth_scanner()
         if not self._require_entries() or not self.pdf_hash:
             return
@@ -912,28 +1166,20 @@ class PackageAuditApp(QMainWindow):
             self.pdf_hash,
             self.entries,
         )
-        if self.scanner_server is not None and self.scanner_server.remote != remote:
-            self.stop_phone_scanner()
         if self.scanner_server is None:
-            self.scanner_server = ScannerServer(self.scanner_coordinator, remote=remote)
+            self.scanner_server = ScannerServer(self.scanner_coordinator)
         was_running = self.scanner_server.running
-        if remote and not was_running:
-            self.remote_scanner_button.setText("Starting Remote Scanner…")
-            self.statusBar().showMessage("Creating a temporary Cloudflare HTTPS address…")
-            QApplication.processEvents()
         try:
             self.scanner_server.start()
         except OSError as exc:
-            mode = "remote" if remote else "local"
-            LOGGER.exception("Could not start the %s scanner server", mode)
+            LOGGER.exception("Could not start the local scanner server")
             self.scanner_server.stop()
             self.scanner_server = None
             self.scanner_button.setText("Local Phone Scanner")
-            self.remote_scanner_button.setText("Remote Phone Scanner")
             QMessageBox.critical(
                 self,
                 "Scanner failed",
-                f"Could not start the {mode} phone scanner:\n\n{exc}",
+                f"Could not start the local phone scanner:\n\n{exc}",
             )
             return
 
@@ -951,15 +1197,8 @@ class PackageAuditApp(QMainWindow):
         self.scanner_dialog.show()
         self.scanner_dialog.raise_()
         self.scanner_dialog.activateWindow()
-        if remote:
-            self.remote_scanner_button.setText("Remote Scanner Info")
-            self.scanner_button.setText("Local Phone Scanner")
-        else:
-            self.scanner_button.setText("Local Scanner Info")
-            self.remote_scanner_button.setText("Remote Phone Scanner")
-        self.statusBar().showMessage(
-            f"{'Remote' if remote else 'Local'} phone scanner running at {self.scanner_server.url}"
-        )
+        self.scanner_button.setText("Local Scanner Info")
+        self.statusBar().showMessage(f"Local phone scanner running at {self.scanner_server.url}")
 
     def stop_phone_scanner(self) -> None:
         self.stop_bluetooth_scanner()
@@ -978,13 +1217,11 @@ class PackageAuditApp(QMainWindow):
         self.scanner_server = None
         if hasattr(self, "scanner_button"):
             self.scanner_button.setText("Local Phone Scanner")
-        if hasattr(self, "remote_scanner_button"):
-            self.remote_scanner_button.setText("Remote Phone Scanner")
         self.statusBar().showMessage("Phone scanner stopped.", 5000)
 
     @staticmethod
     def _entry_carrier(entry: AuditEntry) -> str:
-        return normalize_carrier(entry.package.split(" - ", 1)[0]) or "PKG"
+        return entry.report_carrier
 
     def _scanner_entries(self) -> list[AuditEntry]:
         return [entry for entry in self.entries if entry.item_id not in self.duplicate_suppressed_ids]
@@ -998,16 +1235,15 @@ class PackageAuditApp(QMainWindow):
             self.entries,
         )
         entries_by_id = {entry.item_id: entry for entry in self.entries}
-        suppressed: set[str] = set()
+        _, suppressed = canonical_audit_entries(self.entries)
+        for entry in self.entries:
+            if entry.item_id in suppressed:
+                self.db.set_state(self.pdf_hash, entry.item_id, True)
+                entry.audited = True
         for tracking, records in self.scanner_coordinator.duplicate_groups():
             item_ids = tuple(record.item_id for record in records)
             units = sorted({record.unit for record in records})
             canonical = records[0]
-            for record in records[1:]:
-                suppressed.add(record.item_id)
-                entry = entries_by_id[record.item_id]
-                entry.audited = True
-                self.db.set_state(self.pdf_hash, entry.item_id, True)
             canonical_entry = entries_by_id[canonical.item_id]
             self.db.replace_tracking_duplicate(
                 self.pdf_hash,
@@ -1039,14 +1275,37 @@ class PackageAuditApp(QMainWindow):
         self._refresh_alerts()
 
     def _process_scanner_actions(self) -> None:
+        from copy import deepcopy
+
         actions = self.scanner_coordinator.drain_actions()
         if not actions or not self.pdf_hash:
             return
-        for action in actions:
-            self._apply_scanner_action(action)
+        previous_states = [entry.audited for entry in self.entries]
+        previous_undo = deepcopy(self.scanner_undo)
+        previous_model = None
+        try:
+            previous_model = self.db.load_scanner_model()
+            previous_errors = self.db.load_package_errors(self.pdf_hash)
+            previous_duplicates = self.db.load_double_logged(self.pdf_hash)
+            with self.db.transaction():
+                for action in actions:
+                    self._apply_scanner_action(action)
+        except Exception:
+            for entry, previous in zip(self.entries, previous_states, strict=True):
+                entry.audited = previous
+            self.scanner_undo = previous_undo
+            self.scanner_coordinator.retry_actions(actions)
+            if previous_model is not None:
+                self.scanner_coordinator.set_learning_model(previous_model)
+            self.scanner_coordinator.configure(self.pdf_hash, self.entries)
+            raise
         self.scanner_coordinator.configure(self.pdf_hash, self.entries)
-        self._populate_errors_table(self.db.load_package_errors(self.pdf_hash))
-        self._populate_double_table(self.db.load_double_logged(self.pdf_hash))
+        errors = self.db.load_package_errors(self.pdf_hash)
+        duplicates = self.db.load_double_logged(self.pdf_hash)
+        if errors != previous_errors:
+            self._populate_errors_table(errors)
+        if duplicates != previous_duplicates:
+            self._populate_double_table(duplicates)
         self._refresh_alerts()
         self._refresh_table()
 
@@ -1534,13 +1793,13 @@ class PackageAuditApp(QMainWindow):
 
     # ---------------------------------------------------------------- clears
     def clear_current_audit(self) -> None:
-        """Clear checked rows, package errors, and double logs for this PDF."""
+        """Clear all saved state, including shift notes, for this PDF."""
         if not self._require_pdf():
             return
         if not self._confirm(
             "Clear current audit?",
-            "This will clear checked rows, package errors, double logged rows, scanner alerts, "
-            "and scanner history for the currently loaded PDF.\n\n"
+            "This will clear checked rows, package errors, double logged rows, shift notes, "
+            "scanner alerts, and scanner history for the currently loaded PDF.\n\n"
             "It will not delete the PDF. Continue?",
         ):
             return
@@ -1551,9 +1810,11 @@ class PackageAuditApp(QMainWindow):
             entry.audited = False
         self._populate_errors_table([])
         self._populate_double_table([])
+        self._refresh_shift_notes()
         self.scanner_undo.clear()
         self.scanner_coordinator.configure(self.pdf_hash, self.entries, reset_scans=True)
         self._configure_scanner_for_audit()
+        self._refresh_table()
         self.statusBar().showMessage("Current audit data cleared.", 5000)
 
     def clear_manual_sections(self) -> None:
@@ -1583,6 +1844,8 @@ class PackageAuditApp(QMainWindow):
         )
         if not path_str or not self._validate_export_path(Path(path_str)):
             return
+        if not self._check_export_alerts():
+            return
 
         try:
             write_audit_report(
@@ -1592,6 +1855,7 @@ class PackageAuditApp(QMainWindow):
                 double_logged=self.collect_double_rows(),
                 source_pdf_name=self.pdf_path.name if self.pdf_path else "",
                 audit_note_rules=self.db.load_audit_note_rules(),
+                shift_notes=self.db.load_shift_notes(self.pdf_hash),
             )
         except OSError as exc:
             LOGGER.exception("Could not export audit report to %s", path_str)
@@ -1606,6 +1870,8 @@ class PackageAuditApp(QMainWindow):
         default_name = f"{audit_export_basename()}.csv"
         path_str, _ = QFileDialog.getSaveFileName(self, "Export Audit CSV", default_name, "CSV Files (*.csv)")
         if not path_str or not self._validate_export_path(Path(path_str)):
+            return
+        if not self._check_export_alerts():
             return
 
         try:
@@ -1654,6 +1920,8 @@ class PackageAuditApp(QMainWindow):
             self, "Export Highlighted PDF", default_name, "PDF Files (*.pdf)"
         )
         if not output_str or not self._validate_export_path(Path(output_str)):
+            return
+        if not self._check_export_alerts():
             return
 
         try:
@@ -1715,6 +1983,19 @@ class PackageAuditApp(QMainWindow):
             return False
         self.save_error_rows()
         self.save_double_rows()
+        if not self._check_export_alerts():
+            return False
+        saved = self.db.load_area_checks(self.pdf_hash)
+        dialog = AuditAreaChecklistDialog(saved, self)
+        accepted = dialog.exec() == QDialog.Accepted
+        checked = dialog.checked_areas
+        self.db.replace_area_checks(self.pdf_hash, checked)
+        required = {key for key, _label in AUDIT_AREAS}
+        return accepted and checked == required and self._check_export_alerts()
+
+    def _check_export_alerts(self) -> bool:
+        """Include scans received while an export dialog was open."""
+        self._process_scanner_actions()
         open_alerts = self.db.load_scanner_alerts(self.pdf_hash, include_resolved=False)
         if open_alerts:
             self.tabs.setCurrentIndex(3)
@@ -1726,15 +2007,6 @@ class PackageAuditApp(QMainWindow):
                 "verification, then export again.",
             )
             return False
-        saved = self.db.load_area_checks(self.pdf_hash)
-        dialog = AuditAreaChecklistDialog(saved, self)
-        if dialog.exec() != QDialog.Accepted:
-            return False
-        required = {key for key, _label in AUDIT_AREAS}
-        checked = dialog.checked_areas
-        if checked != required:
-            return False
-        self.db.replace_area_checks(self.pdf_hash, checked)
         return True
 
     def _require_pdf(self) -> bool:
@@ -1772,6 +2044,7 @@ class PackageAuditApp(QMainWindow):
         self.save_error_rows()
         self.save_double_rows()
         self.db.close()
+        self.training_dataset.close()
         super().closeEvent(event)
 
 
